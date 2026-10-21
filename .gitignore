@@ -1,0 +1,29 @@
+# Rust build output
+/target/
+*.rs.bk
+
+# Node.js dependencies, build output, and coverage
+/node_modules/
+/web/node_modules/
+/web/dist/*
+!/web/dist/.gitkeep
+/web/coverage/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Local environment and configuration files
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.local.toml
+
+# Editor and operating-system files
+.idea/
+.fleet/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~

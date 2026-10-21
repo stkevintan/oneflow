@@ -1,0 +1,24 @@
+[package]
+name = "control-plane"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.7", features = ["ws"] }
+rust-embed = "8"
+mime_guess = "2"
+uuid = { version = "1.0", features = ["v4"] }
+tokio = { version = "1.0", features = ["full"] }
+tokio-tungstenite = "0.24"
+futures-util = { version = "0.3", features = ["sink"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+protocol = { path = "../protocol" }
+config-provider = { path = "../config-provider" }
+
+[dev-dependencies]
+# Contract-first drift guard: parses contract/openapi.yaml and checks the router.
+serde_yaml = "0.9"
+tower = { version = "0.5", features = ["util"] }

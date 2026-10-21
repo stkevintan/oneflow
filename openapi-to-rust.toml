@@ -1,0 +1,25 @@
+# Configuration for `openapi-to-rust` (https://openapi-to-rust.dev).
+#
+# `contract/openapi.yaml` is the source of truth; this file only decides how the
+# Rust DTOs are emitted. Regenerate with:
+#
+#   openapi-to-rust generate --config openapi-to-rust.toml
+#
+# and verify committed output is current with:
+#
+#   openapi-to-rust generate --config openapi-to-rust.toml --check
+
+[generator]
+spec_path = "contract/openapi.yaml"
+output_dir = "protocol/src/generated"
+module_name = "control_plane_api"
+
+[features]
+# The axum handlers are hand-written and verified against the contract by
+# `cargo test` in control-plane; only the model types are generated.
+enable_async_client = false
+
+[generator.types]
+# `api_base` is an opaque base URL that the daemon appends paths to, so keep it a
+# String rather than pulling `url::Url` into the daemon's dependency tree.
+uri = "string"

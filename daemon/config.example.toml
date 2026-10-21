@@ -1,0 +1,6 @@
+listen_addr = "0.0.0.0:0"
+daemon_id = "daemon-poc-001"
+connect_timeout_ms = 5000
+read_timeout_ms = 60000
+request_timeout_ms = 120000
+max_response_bytes = 16777216

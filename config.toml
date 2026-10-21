@@ -1,0 +1,6 @@
+[control_plane]
+bind_addr = "0.0.0.0:4000"
+websocket_url = "ws://127.0.0.1:4000/control"
+
+[web]
+addr = "127.0.0.1:5173"

@@ -1,0 +1,273 @@
+openapi: 3.1.0
+info:
+  title: LLM Control Plane API
+  version: 0.1.0
+  description: |
+    Source-of-truth contract for the control plane JSON API.
+
+    Contract-first workflow:
+      1. This file is edited first.
+      2. The React dashboard generates its types from it (`npm run generate:api`).
+      3. The Rust router is verified against it by `cargo test` (see
+         `control-plane/src/main.rs`, `mod contract_tests`).
+
+    The dashboard shell (`/`), static assets and the daemon WebSocket control
+    channel (`/control`) are intentionally outside this contract: they are
+    transport-level endpoints, not JSON resources.
+
+    Inference traffic never passes through these endpoints. Daemons talk to
+    upstream providers directly.
+servers:
+  - url: http://localhost:3000
+    description: Local control plane
+tags:
+  - name: status
+    description: Read-only snapshot of the control plane and its daemons
+  - name: config
+    description: Model configuration distribution
+
+paths:
+  /api/status:
+    get:
+      operationId: getStatus
+      summary: Read the current control plane status
+      description: |
+        Returns server metadata, every connected daemon connection, the recent
+        telemetry ring buffer and the configuration currently being pushed to
+        daemons.
+      tags: [status]
+      responses:
+        "200":
+          description: Status snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+
+  /api/config:
+    post:
+      operationId: pushConfig
+      summary: Replace and broadcast the model configuration
+      description: |
+        Stores the configuration as the new desired state and broadcasts it to
+        every connected daemon. Newly connected daemons receive it on connect.
+      tags: [config]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfigUpdate"
+      responses:
+        "200":
+          description: The stored configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigUpdate"
+        "400":
+          description: The configuration is structurally invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  schemas:
+    StatusResponse:
+      type: object
+      required: [server, daemons, telemetry, config]
+      properties:
+        server:
+          $ref: "#/components/schemas/ServerInfo"
+        daemons:
+          type: array
+          description: One entry per live WebSocket connection.
+          items:
+            $ref: "#/components/schemas/DaemonRecord"
+        telemetry:
+          type: array
+          description: Most recent telemetry events, oldest first (capped at 200).
+          items:
+            $ref: "#/components/schemas/TelemetryRecord"
+        config:
+          $ref: "#/components/schemas/ConfigUpdate"
+
+    ServerInfo:
+      type: object
+      required: [version, uptime_seconds, connected_daemons, config_version]
+      properties:
+        version:
+          type: string
+          description: Control plane build version.
+        uptime_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+        connected_daemons:
+          type: integer
+          minimum: 0
+        config_version:
+          type: string
+
+    DaemonRecord:
+      type: object
+      required:
+        - connection_id
+        - daemon_id
+        - cluster_name
+        - version
+        - hostname
+        - capabilities
+        - connected_at
+        - last_seen
+        - active_requests
+        - loaded_models
+        - total_requests
+        - failed_requests
+        - total_prompt_tokens
+        - total_completion_tokens
+      properties:
+        connection_id:
+          type: string
+          description: Identifier for this WebSocket connection.
+        daemon_id:
+          type: [string, "null"]
+          description: Null until the daemon sends its registration message.
+        cluster_name:
+          type: [string, "null"]
+        version:
+          type: [string, "null"]
+        hostname:
+          type: [string, "null"]
+        capabilities:
+          type: array
+          items:
+            type: string
+        connected_at:
+          type: integer
+          format: int64
+          description: Unix timestamp in seconds.
+        last_seen:
+          type: integer
+          format: int64
+          description: Unix timestamp in seconds of the last message received.
+        active_requests:
+          type: integer
+          minimum: 0
+        loaded_models:
+          type: array
+          items:
+            type: string
+        total_requests:
+          type: integer
+          format: int64
+          minimum: 0
+        failed_requests:
+          type: integer
+          format: int64
+          minimum: 0
+        total_prompt_tokens:
+          type: integer
+          format: int64
+          minimum: 0
+        total_completion_tokens:
+          type: integer
+          format: int64
+          minimum: 0
+
+    TelemetryRecord:
+      type: object
+      required:
+        - daemon_id
+        - model_name
+        - prompt_tokens
+        - completion_tokens
+        - success
+        - received_at
+        - request_id
+        - latency_ms
+        - status_code
+        - streamed
+        - usage_reported
+      properties:
+        daemon_id:
+          type: string
+        model_name:
+          type: string
+        prompt_tokens:
+          type: integer
+          minimum: 0
+        completion_tokens:
+          type: integer
+          minimum: 0
+        success:
+          type: boolean
+        received_at:
+          type: integer
+          format: int64
+          description: Unix timestamp in seconds, stamped by the control plane on arrival.
+        request_id:
+          type: string
+          description: Daemon-generated id, echoed to the client in `x-daemon-request-id`.
+        latency_ms:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Wall-clock duration of the upstream call as observed by the daemon.
+        status_code:
+          type: [integer, "null"]
+          minimum: 100
+          maximum: 599
+          description: Upstream HTTP status, or null when no response was received.
+        streamed:
+          type: boolean
+          description: Whether the client requested a streaming response.
+        usage_reported:
+          type: boolean
+          description: |
+            False when the upstream returned no `usage` object. In that case the token
+            counts are zero because they are unknown, not because they are zero.
+
+    ModelConfig:
+      type: object
+      required: [model_name, provider, api_base, parameters]
+      properties:
+        model_name:
+          type: string
+          description: Model identifier clients send to the daemon.
+        provider:
+          type: string
+          description: Provider adapter, for example `custom_openai`.
+        api_base:
+          type: string
+          format: uri
+          description: Upstream base URL, for example `https://api.deepseek.com/v1`.
+        parameters:
+          type: object
+          description: |
+            Free-form provider options. `upstream_model` rewrites the model id
+            sent upstream; `api_key_env` names an environment variable holding
+            the upstream credential.
+          additionalProperties:
+            type: string
+
+    ConfigUpdate:
+      type: object
+      required: [version, models]
+      properties:
+        version:
+          type: string
+          description: Opaque version label shown in the dashboard and applied by daemons.
+        models:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/ModelConfig"
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string

@@ -1,0 +1,130 @@
+//! Shared types for the control plane ⇄ daemon relationship.
+//!
+//! Two layers live here, and the distinction is deliberate:
+//!
+//! * [`generated`] — DTOs generated from `contract/openapi.yaml`, the source of
+//!   truth for the HTTP API. Regenerate with
+//!   `openapi-to-rust generate --config openapi-to-rust.toml`. Never hand-edit.
+//! * The WebSocket control-channel messages below ([`ControlMessage`],
+//!   [`DaemonMessage`], …). These are outside the HTTP contract (the contract
+//!   documents the JSON API only), so they are hand-written. They reuse the
+//!   generated [`ModelConfig`] rather than defining a second copy of it.
+
+// `generated/` is emitted by `openapi-to-rust`; rustfmt must not rewrite it or
+// the generator's `--check` mode would report the committed output as stale.
+#[rustfmt::skip]
+pub mod generated;
+
+pub use generated::types::*;
+
+use serde::{Deserialize, Serialize};
+
+/// Hand-written conveniences over the generated `additionalProperties` newtype,
+/// so call sites do not have to reach through `.additional_properties`.
+impl ModelConfigParameters {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.additional_properties.insert(key.into(), value.into());
+    }
+
+    pub fn get(&self, key: &str) -> Option<&String> {
+        self.additional_properties.get(key)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &String)> {
+        self.additional_properties.iter()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.additional_properties.is_empty()
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "type")]
+pub enum ControlMessage {
+    ConfigUpdate {
+        models: Vec<ModelConfig>,
+        version: String,
+    },
+    Command {
+        cmd: String,
+        reason: String,
+    },
+}
+
+impl From<ConfigUpdate> for ControlMessage {
+    fn from(config: ConfigUpdate) -> Self {
+        ControlMessage::ConfigUpdate {
+            models: config.models,
+            version: config.version,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "type")]
+pub enum DaemonMessage {
+    Registration(Registration),
+    Heartbeat(Heartbeat),
+    Telemetry(Telemetry),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Registration {
+    pub daemon_id: String,
+    pub cluster_name: String,
+    pub version: String,
+    pub capabilities: Vec<String>,
+    pub hostname: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Heartbeat {
+    pub daemon_id: String,
+    pub active_requests: u32,
+    pub loaded_models: Vec<String>,
+}
+
+/// Per-request telemetry reported by a daemon after it calls an upstream
+/// provider. The control plane accumulates these into [`TelemetryRecord`].
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Telemetry {
+    pub daemon_id: String,
+    pub model_name: String,
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub success: bool,
+    pub request_id: String,
+    pub latency_ms: i64,
+    pub status_code: Option<u16>,
+    pub streamed: bool,
+    /// False when the upstream returned no `usage` object, so the token counts are
+    /// unknown rather than genuinely zero.
+    pub usage_reported: bool,
+}
+
+impl From<Telemetry> for TelemetryRecord {
+    fn from(telemetry: Telemetry) -> Self {
+        // Written as an exhaustive struct literal on purpose: a field added to
+        // either side of the contract becomes a compile error here rather than
+        // silently drifting.
+        Self {
+            daemon_id: telemetry.daemon_id,
+            model_name: telemetry.model_name,
+            prompt_tokens: i64::from(telemetry.prompt_tokens),
+            completion_tokens: i64::from(telemetry.completion_tokens),
+            success: telemetry.success,
+            request_id: telemetry.request_id,
+            latency_ms: telemetry.latency_ms,
+            status_code: telemetry.status_code.map(i64::from),
+            streamed: telemetry.streamed,
+            usage_reported: telemetry.usage_reported,
+            // Receipt time is stamped by the control plane, which overwrites this.
+            received_at: 0,
+        }
+    }
+}
