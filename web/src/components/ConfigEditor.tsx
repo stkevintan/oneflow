@@ -1,22 +1,22 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { pushConfig } from "../api/client";
-import type { ConfigUpdate } from "../api/client";
+import { putConfig } from "../api/client";
+import type { ModelConfigSet } from "../api/client";
 import { Card } from "./Card";
 
 interface ConfigEditorProps {
   /** Latest configuration reported by the control plane. */
-  config: ConfigUpdate | null;
+  config: ModelConfigSet | null;
   onPushed: () => void;
 }
 
 type MessageState = "idle" | "ok" | "error";
 
-function isConfigUpdate(value: unknown): value is ConfigUpdate {
+function isModelConfigSet(value: unknown): value is ModelConfigSet {
   if (typeof value !== "object" || value === null) {
     return false;
   }
-  const candidate = value as Partial<ConfigUpdate>;
+  const candidate = value as Partial<ModelConfigSet>;
   return typeof candidate.version === "string" && Array.isArray(candidate.models);
 }
 
@@ -47,7 +47,7 @@ export function ConfigEditor({ config, onPushed }: ConfigEditorProps) {
       return;
     }
 
-    if (!isConfigUpdate(parsed)) {
+    if (!isModelConfigSet(parsed)) {
       setMessageState("error");
       setMessage('Expected an object with a "version" string and a "models" array.');
       return;
@@ -58,7 +58,7 @@ export function ConfigEditor({ config, onPushed }: ConfigEditorProps) {
     setMessage("Pushing configuration…");
 
     try {
-      await pushConfig(parsed);
+      await putConfig(parsed);
       setDirty(false);
       setMessageState("ok");
       setMessage("Configuration pushed to all connected daemons.");

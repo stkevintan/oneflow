@@ -1,23 +1,45 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { fetchStatus } from "./client";
-import type { StatusResponse } from "./client";
+import { getConfig, getStatus, listDaemons, listUsageEvents } from "./client";
+import type { Daemon, ModelConfigSet, StatusResponse, UsageEvent } from "./client";
 
 export type ConnectionState = "connecting" | "live" | "offline";
 
-export interface StatusState {
-  status: StatusResponse | null;
+/** Number of usage events the dashboard shows. */
+export const RECENT_USAGE_LIMIT = 25;
+
+export interface DashboardSnapshot {
+  status: StatusResponse;
+  daemons: Daemon[];
+  /** Newest first. */
+  usage: UsageEvent[];
+  config: ModelConfigSet;
+}
+
+export interface DashboardState {
+  snapshot: DashboardSnapshot | null;
   error: string | null;
   connection: ConnectionState;
   refresh: () => Promise<void>;
 }
 
+async function fetchSnapshot(signal: AbortSignal): Promise<DashboardSnapshot> {
+  const [status, daemons, usage, config] = await Promise.all([
+    getStatus(signal),
+    listDaemons(signal),
+    listUsageEvents({ limit: RECENT_USAGE_LIMIT }, signal),
+    getConfig(signal),
+  ]);
+  return { status, daemons: daemons.items, usage: usage.items, config };
+}
+
 /**
- * Polls `GET /api/status` and exposes the latest snapshot. Polling is paused
- * while the tab is hidden to avoid pointless traffic.
+ * Polls the `/v1` resources the dashboard renders and exposes the latest
+ * snapshot. Polling is paused while the tab is hidden to avoid pointless
+ * traffic.
  */
-export function useStatus(pollIntervalMs = 3000): StatusState {
-  const [status, setStatus] = useState<StatusResponse | null>(null);
+export function useDashboard(pollIntervalMs = 3000): DashboardState {
+  const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const controllerRef = useRef<AbortController | null>(null);
@@ -28,8 +50,8 @@ export function useStatus(pollIntervalMs = 3000): StatusState {
     controllerRef.current = controller;
 
     try {
-      const snapshot = await fetchStatus(controller.signal);
-      setStatus(snapshot);
+      const next = await fetchSnapshot(controller.signal);
+      setSnapshot(next);
       setError(null);
       setConnection("live");
     } catch (cause) {
@@ -71,5 +93,5 @@ export function useStatus(pollIntervalMs = 3000): StatusState {
     };
   }, [pollIntervalMs, refresh]);
 
-  return { status, error, connection, refresh };
+  return { snapshot, error, connection, refresh };
 }

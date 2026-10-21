@@ -35,15 +35,122 @@ const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 struct Args {
     /// Control-plane WebSocket endpoint, reachable from this daemon host.
     #[arg(long, value_name = "URL")]
-    cp: String,
-    /// Path to the daemon's TOML configuration file.
+    cp: Option<String>,
+    /// Config file to read (defaults to ./config.toml when present).
     #[arg(long, value_name = "PATH")]
-    config: PathBuf,
+    config: Option<PathBuf>,
+    /// HTTP listener address.
+    #[arg(long, value_name = "SOCKET")]
+    listen_addr: Option<String>,
+    /// Daemon identity reported during registration.
+    #[arg(long)]
+    daemon_id: Option<String>,
+    /// Upstream TCP/TLS connect timeout in milliseconds.
+    #[arg(long)]
+    connect_timeout_ms: Option<u64>,
+    /// Upstream per-read timeout in milliseconds.
+    #[arg(long)]
+    read_timeout_ms: Option<u64>,
+    /// Upstream request timeout in milliseconds.
+    #[arg(long)]
+    request_timeout_ms: Option<u64>,
+    /// Maximum buffered upstream response size in bytes.
+    #[arg(long)]
+    max_response_bytes: Option<usize>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct DaemonConfig {
+    cp: Option<String>,
+    listen_addr: Option<String>,
+    daemon_id: Option<String>,
+    connect_timeout_ms: Option<u64>,
+    read_timeout_ms: Option<u64>,
+    request_timeout_ms: Option<u64>,
+    max_response_bytes: Option<usize>,
+}
+
+impl DaemonConfig {
+    fn load(path: &Path) -> Result<Self> {
+        let contents = fs::read_to_string(path)
+            .with_context(|| format!("failed to read daemon config {}", path.display()))?;
+        Self::load_from_str(&contents)
+            .with_context(|| format!("failed to parse daemon config {}", path.display()))
+    }
+
+    fn load_from_str(contents: &str) -> Result<Self> {
+        toml::from_str(contents).context("daemon config must contain daemon settings at top level")
+    }
+
+    fn load_default_or_explicit(path: Option<&Path>) -> Result<Self> {
+        if let Some(path) = path {
+            return Self::load(path);
+        }
+
+        let path = Path::new("config.toml");
+        if path.is_file() {
+            Self::load(path)
+        } else {
+            Ok(Self::default())
+        }
+    }
+
+    fn resolve(args: &Args, file: Self) -> Result<ResolvedConfig> {
+        let cp = args
+            .cp
+            .clone()
+            .or_else(|| env::var("CONTROL_PLANE_URL").ok())
+            .or(file.cp)
+            .context("control-plane URL required: provide --cp, CONTROL_PLANE_URL, or the TOML cp setting")?;
+
+        let listen_addr = args
+            .listen_addr
+            .clone()
+            .or_else(|| env::var("DAEMON_LISTEN_ADDR").ok())
+            .or(file.listen_addr)
+            .unwrap_or_else(|| "127.0.0.1:0".to_string());
+        let daemon_id = args
+            .daemon_id
+            .clone()
+            .or_else(|| env::var("DAEMON_ID").ok())
+            .or(file.daemon_id)
+            .unwrap_or_else(|| "daemon-poc-001".to_string());
+        let connect_timeout_ms = args
+            .connect_timeout_ms
+            .or_else(|| env_u64("UPSTREAM_CONNECT_TIMEOUT_MS"))
+            .or(file.connect_timeout_ms)
+            .unwrap_or(DEFAULT_CONNECT_TIMEOUT_MS);
+        let read_timeout_ms = args
+            .read_timeout_ms
+            .or_else(|| env_u64("UPSTREAM_READ_TIMEOUT_MS"))
+            .or(file.read_timeout_ms)
+            .unwrap_or(DEFAULT_READ_TIMEOUT_MS);
+        let request_timeout_ms = args
+            .request_timeout_ms
+            .or_else(|| env_u64("UPSTREAM_REQUEST_TIMEOUT_MS"))
+            .or(file.request_timeout_ms)
+            .unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS);
+        let max_response_bytes = args
+            .max_response_bytes
+            .or_else(|| env_usize("MAX_UPSTREAM_RESPONSE_BYTES"))
+            .or(file.max_response_bytes)
+            .unwrap_or(DEFAULT_MAX_RESPONSE_BYTES);
+
+        Ok(ResolvedConfig {
+            cp,
+            listen_addr,
+            daemon_id,
+            connect_timeout_ms,
+            read_timeout_ms,
+            request_timeout_ms,
+            max_response_bytes,
+        })
+    }
+}
+
+struct ResolvedConfig {
+    cp: String,
     listen_addr: String,
     daemon_id: String,
     connect_timeout_ms: u64,
@@ -52,44 +159,31 @@ struct DaemonConfig {
     max_response_bytes: usize,
 }
 
-impl Default for DaemonConfig {
-    fn default() -> Self {
-        Self {
-            listen_addr: "0.0.0.0:0".to_string(),
-            daemon_id: "daemon-poc-001".to_string(),
-            connect_timeout_ms: DEFAULT_CONNECT_TIMEOUT_MS,
-            read_timeout_ms: DEFAULT_READ_TIMEOUT_MS,
-            request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
-            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
-        }
-    }
-}
-
-impl DaemonConfig {
-    fn load(path: &Path) -> Result<Self> {
-        let contents = fs::read_to_string(path)
-            .with_context(|| format!("failed to read daemon config {}", path.display()))?;
-        toml::from_str(&contents)
-            .with_context(|| format!("failed to parse daemon config {}", path.display()))
-    }
-}
-
 #[cfg(test)]
 mod config_tests {
     use super::*;
 
     #[test]
     fn example_config_has_an_ephemeral_listener() {
-        let config: DaemonConfig = toml::from_str(include_str!("../config.example.toml")).unwrap();
-        let listen_addr: SocketAddr = config.listen_addr.parse().unwrap();
+        let config = DaemonConfig::load_from_str(include_str!("../config.example.toml")).unwrap();
+        let listen_addr: SocketAddr = config.listen_addr.unwrap().parse().unwrap();
 
+        assert!(listen_addr.ip().is_loopback());
         assert_eq!(listen_addr.port(), 0);
     }
 
     #[test]
-    fn cli_requires_control_plane_and_config_arguments() {
-        assert!(Args::try_parse_from(["daemon", "--cp", "ws://localhost:4000/control"]).is_err());
-        assert!(Args::try_parse_from(["daemon", "--config", "daemon.toml"]).is_err());
+    fn defaults_to_a_local_ephemeral_listener() {
+        let listen_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+        assert!(listen_addr.ip().is_loopback());
+        assert_eq!(listen_addr.port(), 0);
+    }
+
+    #[test]
+    fn cli_allows_config_file_or_command_line_values() {
+        assert!(Args::try_parse_from(["daemon"]).is_ok());
+        assert!(Args::try_parse_from(["daemon", "--cp", "ws://localhost:4000/control"]).is_ok());
         assert!(Args::try_parse_from([
             "daemon",
             "--cp",
@@ -98,6 +192,44 @@ mod config_tests {
             "daemon.toml"
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn config_file_reads_standalone_daemon_settings() {
+        let config = DaemonConfig::load_from_str(
+            r#"
+                cp = "ws://daemon.example:4000/control"
+                listen_addr = "127.0.0.1:9000"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.cp.as_deref(),
+            Some("ws://daemon.example:4000/control")
+        );
+        assert_eq!(config.listen_addr.as_deref(), Some("127.0.0.1:9000"));
+    }
+
+    #[test]
+    fn cli_values_override_file_values() {
+        let args = Args::try_parse_from([
+            "daemon",
+            "--cp",
+            "ws://cli.example:4000/control",
+            "--listen-addr",
+            "127.0.0.1:9001",
+        ])
+        .unwrap();
+        let file = DaemonConfig {
+            cp: Some("ws://file.example:4000/control".to_string()),
+            listen_addr: Some("127.0.0.1:9000".to_string()),
+            ..DaemonConfig::default()
+        };
+
+        let resolved = DaemonConfig::resolve(&args, file).unwrap();
+        assert_eq!(resolved.cp, "ws://cli.example:4000/control");
+        assert_eq!(resolved.listen_addr, "127.0.0.1:9001");
     }
 }
 
@@ -114,14 +246,14 @@ pub(crate) struct DaemonSettings {
 }
 
 impl DaemonSettings {
-    fn from_config(config: &DaemonConfig) -> Self {
+    fn from_config(config: &ResolvedConfig) -> Self {
         Self {
-            daemon_id: env::var("DAEMON_ID").unwrap_or_else(|_| config.daemon_id.clone()),
+            daemon_id: config.daemon_id.clone(),
             api_keys: env_list("DAEMON_API_KEYS"),
-            connect_timeout: env_duration("UPSTREAM_CONNECT_TIMEOUT_MS", config.connect_timeout_ms),
-            read_timeout: env_duration("UPSTREAM_READ_TIMEOUT_MS", config.read_timeout_ms),
-            request_timeout: env_duration("UPSTREAM_REQUEST_TIMEOUT_MS", config.request_timeout_ms),
-            max_response_bytes: env_usize("MAX_UPSTREAM_RESPONSE_BYTES", config.max_response_bytes),
+            connect_timeout: Duration::from_millis(config.connect_timeout_ms),
+            read_timeout: Duration::from_millis(config.read_timeout_ms),
+            request_timeout: Duration::from_millis(config.request_timeout_ms),
+            max_response_bytes: config.max_response_bytes,
         }
     }
 }
@@ -219,29 +351,29 @@ pub(crate) fn now_ts() -> i64 {
         .unwrap_or_default()
 }
 
-fn env_duration(name: &str, default_ms: u64) -> Duration {
+fn env_u64(name: &str) -> Option<u64> {
     match env::var(name) {
         Ok(value) => match value.trim().parse::<u64>() {
-            Ok(ms) => Duration::from_millis(ms),
+            Ok(ms) => Some(ms),
             Err(err) => {
-                warn!(%name, %value, error = %err, "invalid duration, using default");
-                Duration::from_millis(default_ms)
+                warn!(%name, %value, error = %err, "invalid duration setting; ignoring environment value");
+                None
             }
         },
-        Err(_) => Duration::from_millis(default_ms),
+        Err(_) => None,
     }
 }
 
-fn env_usize(name: &str, default: usize) -> usize {
+fn env_usize(name: &str) -> Option<usize> {
     match env::var(name) {
         Ok(value) => match value.trim().parse::<usize>() {
-            Ok(parsed) => parsed,
+            Ok(parsed) => Some(parsed),
             Err(err) => {
-                warn!(%name, %value, error = %err, "invalid number, using default");
-                default
+                warn!(%name, %value, error = %err, "invalid numeric setting; ignoring environment value");
+                None
             }
         },
-        Err(_) => default,
+        Err(_) => None,
     }
 }
 
@@ -268,9 +400,10 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
-    let config = DaemonConfig::load(&args.config)?;
+    let config = DaemonConfig::load_default_or_explicit(args.config.as_deref())?;
+    let config = DaemonConfig::resolve(&args, config)?;
     let settings = DaemonSettings::from_config(&config);
-    let control_plane_url = args.cp;
+    let control_plane_url = config.cp;
     let listen_addr: SocketAddr = config
         .listen_addr
         .parse()

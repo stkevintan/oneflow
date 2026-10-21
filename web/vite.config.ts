@@ -50,8 +50,15 @@ if (!webAddress.port) {
   throw new Error('configuration value "web.addr" must include a port');
 }
 
-// The built `dist/` directory is embedded into the control-plane binary by
-// rust-embed, so it must stay a plain static bundle (relative asset paths).
+// The control plane is API-only. Both the dev server and `vite preview` proxy
+// `/v1` to it, so the dashboard runs locally without CORS configuration. A
+// bundle hosted elsewhere sets VITE_CONTROL_PLANE_URL at build time instead.
+const apiProxy = {
+  "/v1": {
+    target: controlPlaneWebSocketUrl.origin,
+  },
+};
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   base: "/",
@@ -63,11 +70,13 @@ export default defineConfig({
     host: webAddress.hostname,
     port: Number(webAddress.port),
     strictPort: true,
-    proxy: {
-      "/api": {
-        target: controlPlaneWebSocketUrl.origin,
-      },
-    },
+    proxy: apiProxy,
+  },
+  preview: {
+    host: webAddress.hostname,
+    port: Number(webAddress.port),
+    strictPort: true,
+    proxy: apiProxy,
   },
   test: {
     environment: "jsdom",

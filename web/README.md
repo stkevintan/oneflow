@@ -1,9 +1,9 @@
 # Control Plane Dashboard
 
-React + TypeScript + Tailwind frontend for the `control-plane` service. The built
-bundle is **embedded into the control-plane binary at compile time** with
-[`rust-embed`](https://crates.io/crates/rust-embed), so there is no separate
-deployment step: `cargo run -p control-plane` serves the dashboard at `/`.
+React + TypeScript + Tailwind client for the `control-plane` service. The control
+plane is a pure API service (`/v1/*` and `/control`) and serves no UI, so the
+dashboard is deployed on its own, like any other client (CLI, TUI, desktop); see
+[ADR 0001](../docs/adr/0001-api-only-stateless-control-plane.md).
 
 ## Contract-first workflow
 
@@ -26,10 +26,10 @@ On the Rust side both layers consume the same contract:
 * the **DTOs** are generated into `protocol/src/generated/` by
   [`openapi-to-rust`](https://openapi-to-rust.dev) (config: `openapi-to-rust.toml`),
 * the **handlers** stay hand-written, and `cargo test` runs `contract_tests` in
-  `control-plane/src/main.rs`, which parses the contract and asserts that every
-  declared path/method actually exists on the axum router, that `/api/status`
-  exposes every contract-required field, and that undeclared `/api/*` paths
-  return JSON 404.
+  `control-plane/src/api.rs`, which parses the contract and asserts that every
+  declared path/method actually exists on the axum router, that every GET
+  response carries every contract-required field, and that unknown paths return
+  JSON 404.
 
 A route renamed in Rust without updating the contract (or vice versa) fails the
 build. Regenerate all bindings with [`scripts/generate-types.sh`](../scripts/generate-types.sh);
@@ -43,12 +43,12 @@ build. Regenerate all bindings with [`scripts/generate-types.sh`](../scripts/gen
 | `src/main.tsx`           | React bootstrap                                       |
 | `src/App.tsx`            | Dashboard composition                                |
 | `src/api/schema.d.ts`    | Generated from the contract                          |
-| `src/api/client.ts`      | Typed API client and generated type aliases          |
-| `src/api/useStatus.ts`   | Polling hook for `GET /api/status`                   |
+| `src/api/client.ts`      | Typed `/v1` client and generated type aliases         |
+| `src/api/useDashboard.ts`| Polling hook for status, daemons, usage, and config  |
+| `src/env.d.ts`           | Type for `VITE_CONTROL_PLANE_URL`                    |
 | `src/components/`        | `Topbar`, `Card`, `DaemonTable`, `TelemetryTable`, `ConfigEditor` |
 | `src/App.test.tsx`       | Renders the dashboard against a stubbed API          |
-| `scripts/ensure-dist.mjs`| Restores the `dist/` marker after `vite build` clears it |
-| `dist/`                  | Build output, embedded by rust-embed                 |
+| `dist/`                  | Build output (git-ignored), deployed separately      |
 
 ## Commands
 
@@ -57,24 +57,36 @@ npm install
 npm run generate:api   # regenerate types from contract/openapi.yaml
 npm run dev            # address and API proxy are read from ../config.toml
 npm run build          # generate:api + typecheck + vite build -> dist/
+npm run preview        # serve dist/ on the same address, with the same /v1 proxy
 npm test               # vitest + jsdom component tests
 npm run typecheck
 ```
 
-The shared `../config.toml` configures the control-plane bind address and the
-web development server address. The production dashboard is embedded and served
-by the control plane. The daemon is a standalone executable with its own TOML
-file and explicit `--cp` WebSocket endpoint; see
+The shared `../config.toml` configures the control-plane address and the address
+of the dev and preview servers. Both servers proxy `/v1` to the control plane, so
+the browser sees a single origin and no CORS setup is needed. Set `LLMCP_CONFIG`
+to use a different TOML file. The daemon is a standalone executable with its own
+TOML file and explicit `--cp` WebSocket endpoint; see
 [`../daemon/README.md`](../daemon/README.md).
 
-Run `cargo run -p control-plane` from the repository root alongside `npm run
-dev` so the `/api` proxy has something to talk to. Set `LLMCP_CONFIG` to use a
-different TOML file. For the embedded build run `npm run build` first, then
-`cargo run -p control-plane` and open the configured control-plane address.
+Run `cargo run -p control-plane` from the repository root alongside `npm run dev`
+(or `npm run preview`) so the proxy has something to talk to.
 
-## Fresh checkout
+## Hosting the bundle elsewhere
 
-`web/dist/` contains a committed placeholder page and is otherwise git-ignored.
-That means `cargo build` works before the frontend has ever been built: the
-control-plane compiles, the JSON API is fully functional, and `/` serves the
-"frontend not built" placeholder instead of the dashboard.
+`dist/` is plain static files and can be served by any static host. When it is
+not served through the proxy, build it with the control-plane URL and allow that
+origin on the control plane:
+
+```sh
+VITE_CONTROL_PLANE_URL=https://cp.example npm run build
+```
+
+```toml
+# ../config.toml on the control-plane host
+[control_plane]
+cors_allowed_origins = ["https://dashboard.example"]
+```
+
+The contract declares bearer auth, but the control plane does not enforce it yet
+and the dashboard sends no token.

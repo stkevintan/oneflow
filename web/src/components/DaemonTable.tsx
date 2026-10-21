@@ -1,9 +1,9 @@
-import type { DaemonRecord } from "../api/client";
+import type { Daemon } from "../api/client";
 import { formatClock, formatCount, formatRelative } from "../lib/format";
 import { EmptyState } from "./Card";
 
 interface DaemonTableProps {
-  daemons: DaemonRecord[];
+  daemons: Daemon[];
 }
 
 const HEADERS = [

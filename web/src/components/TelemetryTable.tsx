@@ -1,9 +1,10 @@
-import type { TelemetryRecord } from "../api/client";
+import type { UsageEvent } from "../api/client";
 import { formatClock, formatLatency } from "../lib/format";
 import { EmptyState } from "./Card";
 
 interface TelemetryTableProps {
-  events: TelemetryRecord[];
+  /** Newest first, as returned by `GET /v1/usage/events`. */
+  events: UsageEvent[];
   limit?: number;
 }
 
@@ -47,7 +48,7 @@ function TokenCell({
 }
 
 export function TelemetryTable({ events, limit = 25 }: TelemetryTableProps) {
-  const recent = events.slice(-limit).reverse();
+  const recent = events.slice(0, limit);
 
   return (
     <>

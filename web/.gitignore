@@ -1,8 +1,5 @@
 node_modules/
 
-# `dist/` is build output. Only the marker file is tracked so that the
-# rust-embed folder exists in a fresh checkout (see web/README.md).
-dist/*
-!dist/.gitkeep
+dist/
 
 *.local

@@ -8,22 +8,35 @@ Build it from the repository root:
 cargo build --release -p daemon
 ```
 
-Copy `target/release/daemon` and a daemon-specific TOML file to the daemon
-machine, then start it with the control plane's reachable WebSocket URL:
+Copy `target/release/daemon` and its standalone `config.toml` to the remote
+machine, then start it from that config's directory:
 
 ```sh
-./daemon --cp ws://control-plane.example:4000/control --config ./daemon.toml
+./daemon
 ```
 
-`--cp` is the endpoint the daemon connects to; the daemon always initiates this
-WebSocket connection. `--config` is the path to a local TOML file. Start from
-[`config.example.toml`](./config.example.toml). The daemon API defaults to
-`0.0.0.0:0`, so the OS chooses an available port and the selected address is
-logged at startup. Set `listen_addr` to a fixed socket address if required.
+The daemon automatically reads `./config.toml` when present. The daemon's
+configuration is independent of the control-plane/web configuration. Start
+from [`config.example.toml`](./config.example.toml), which uses top-level
+daemon settings, and place it on the remote machine as `config.toml`. Use
+`--config PATH` to select a different file, or pass settings directly as CLI
+options. CLI options take precedence over environment variables, which take
+precedence over TOML values and then built-in defaults. The control-plane URL
+must be provided with `--cp`, `CONTROL_PLANE_URL`, or the `cp` TOML setting;
+the daemon always initiates this WebSocket connection.
 
-`DAEMON_API_KEYS` optionally sets comma-separated client API keys. The
-configuration file also supports `daemon_id`, `connect_timeout_ms`,
-`read_timeout_ms`, `request_timeout_ms`, and `max_response_bytes`.
-`DAEMON_ID`, `UPSTREAM_CONNECT_TIMEOUT_MS`, `UPSTREAM_READ_TIMEOUT_MS`,
-`UPSTREAM_REQUEST_TIMEOUT_MS`, and `MAX_UPSTREAM_RESPONSE_BYTES` override the
-matching TOML values. `CLUSTER_NAME` configures the cluster label.
+The repository-root `config.toml` is for the control plane and web server, not
+the daemon. When running from the repository root, specify the daemon file
+explicitly, for example `--config daemon/config.example.toml`.
+
+The API listens on `127.0.0.1:0` by default, so it is available only to local
+clients and the OS chooses an available port. The selected address is logged
+at startup. See [`config.example.toml`](./config.example.toml) for the
+available daemon settings and their defaults.
+
+`DAEMON_API_KEYS` optionally sets comma-separated client API keys.
+`DAEMON_ID`, `DAEMON_LISTEN_ADDR`, `UPSTREAM_CONNECT_TIMEOUT_MS`,
+`UPSTREAM_READ_TIMEOUT_MS`, `UPSTREAM_REQUEST_TIMEOUT_MS`, and
+`MAX_UPSTREAM_RESPONSE_BYTES` override matching TOML values. CLI options
+override those environment variables. `CLUSTER_NAME` configures the cluster
+label.

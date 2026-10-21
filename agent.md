@@ -12,6 +12,9 @@ Create a **running Proof of Concept** for a new centralized control system:
 
 ## Architecture
 
+Full architecture docs (L0 context → L1 containers → L2 detailed design) live in
+[`docs/`](docs/README.md).
+
 `contract/openapi.yaml` is the single source of truth for the JSON API. Both language
 bindings are generated from it; the WebSocket control channel is hand-written but
 reuses the generated model types.
@@ -23,9 +26,8 @@ contract/openapi.yaml                 source of truth, edited first
         |                                       |
         |                                       v
         |                               web/ React 19 + TS + Tailwind 4 + Vite
-        |                                       |  npm run build
-        |                                       v
-        |                               web/dist/  --rust-embed--> control-plane binary
+        |                                       |  npm run build -> web/dist/ (static,
+        |                                       |  deployed separately; calls /v1 only)
         |
         +-- openapi-to-rust ------------> protocol/src/generated/  (generated DTOs)
                                                 |
@@ -37,7 +39,7 @@ contract/openapi.yaml                 source of truth, edited first
                         +-----------------------+-----------------------+
                         v                                               v
         control-plane binary                                   daemon binary
-        /control (WS), /api/* (JSON), / (dashboard)            OpenAI-compatible /v1/*
+        /control (WS), /v1/* (JSON API only)                   OpenAI-compatible /v1/*
                         ^                                               |
                         |   WebSocket /control (JSON)                  v
                         +-------------------------------- upstream providers (DeepSeek, vLLM)
@@ -52,10 +54,10 @@ contract/openapi.yaml                 source of truth, edited first
 3. Generated files are never hand-edited. `scripts/generate-types.sh --check` fails when
    committed output is stale (use it in CI).
 4. Rust HTTP handlers are hand-written, but `cargo test` runs `contract_tests`
-   (`control-plane/src/main.rs`), which parses the contract and asserts that every
-   declared path/method exists on the axum router, that `/api/status` exposes every
-   contract-required field, that nullable fields serialize as explicit `null`s, and that
-   undeclared `/api/*` paths return JSON 404.
+   (`control-plane/src/api.rs`), which parses the contract and asserts that every
+   declared path/method exists on the axum router, that every GET response carries every
+   contract-required field (following `$ref`s), and that unknown paths and methods return
+   JSON 404/405.
 5. Rust DTOs and handlers are intentionally decoupled: the DTOs are generated, the
    handlers are not. `#[rustfmt::skip]` keeps `rustfmt` off `protocol/src/generated/` so
    the generator's `--check` stays meaningful.
@@ -71,9 +73,12 @@ contract/openapi.yaml                 source of truth, edited first
   - WebSocket endpoint at `/control` for the daemon control channel
   - Tracks every connection: registration, heartbeats, telemetry totals, last-seen
   - Broadcasts configuration updates to all connected daemons via a `tokio::sync::broadcast` channel
-  - Serves the JSON API (`/api/status`, `/api/config`) using the generated DTOs
-  - Serves the embedded dashboard; unknown `/api/*` paths return JSON 404, all other
-    paths fall back to the SPA shell
+  - Pure API service (ADR 0001 step 1): `/v1/health`, `/v1/status`, `GET/PUT /v1/config`,
+    `/v1/daemons[/{connection_id}]`, paginated `/v1/usage/events`, using the generated DTOs.
+    Serves no HTML; every error is a JSON `ErrorResponse`. Optional CORS allow-list.
+  - Bearer auth is declared in the contract but **not enforced** yet
+  - Modules: `api.rs` (routes), `control.rs` (WebSocket), `store.rs` (`MemoryStore`, the
+    seam for PostgreSQL)
 - Implemented **Daemon** (`daemon`), split into `main.rs` (wiring/state/control channel),
   `api.rs` (routes/auth) and `upstream.rs` (usage accounting/streaming):
   - Connects to control plane via WebSocket and registers with cluster name (`cluster-ssh198`)
@@ -90,25 +95,30 @@ contract/openapi.yaml                 source of truth, edited first
     scan buffer
   - Optional client authentication via `DAEMON_API_KEYS` (401 in OpenAI error shape)
   - In-flight request accounting that stays accurate for the lifetime of a stream
-- Implemented **Dashboard** (`web/`): React 19 + TypeScript + Tailwind 4 + Vite, embedded with `rust-embed`
+- Implemented **Dashboard** (`web/`): React 19 + TypeScript + Tailwind 4 + Vite; a standalone `/v1`
+  client (dev/preview proxy, or `VITE_CONTROL_PLANE_URL` for another origin)
   - Connected daemons table, recent telemetry, model configuration editor that pushes to all daemons
   - Vitest + jsdom component tests (`npm test`)
 - Added `scripts/generate-types.sh` to regenerate both bindings, with a `--check` mode
 
 ## Current Status
-- Control Plane runs on port 3000 and serves `/control` (WebSocket), `/api/*` (JSON), and `/` (embedded dashboard)
-- Daemon serves an OpenAI-compatible API on port 4000 and reacts to pushed configuration
+- Control Plane listens on `control_plane.bind_addr` (default `0.0.0.0:4000`) and serves only
+  `/control` (WebSocket) and `/v1/*` (JSON); `/` is a JSON 404
+- Dashboard runs separately via `npm run dev` / `npm run preview` on `web.addr` (default `127.0.0.1:5173`)
+- Daemon serves an OpenAI-compatible API on its `listen_addr` and reacts to pushed configuration
 - **Phase 1 complete**: the daemon inference endpoint reports real usage. Verified end-to-end
   against a mock upstream: a unary call reported 17/5 tokens, a streaming call reported 21/13
   tokens with the usage frame deliberately split across two socket writes, an upstream that
   omits `usage` was recorded as `usage_reported: false` with zero tokens rather than a silent
   zero, unauthenticated calls were rejected with 401 before reaching the upstream, and
   `/healthz` reported zero dropped telemetry
-- Earlier end-to-end checks still hold: config pushed through `/api/config` is broadcast, a live
+- Earlier end-to-end checks still hold: config pushed through `PUT /v1/config` is broadcast, a live
   daemon immediately serves the new model list, `upstream_model` rewrites the model id sent
   upstream, and `api_key_env` injects the upstream bearer token
-- `cargo test --workspace` passes: 5 contract tests and 13 daemon tests; `openapi-to-rust --check`,
-  `npm test` and `npm run typecheck` pass
+- `cargo test --workspace` passes: 13 control-plane (9 contract + 4 store), 15 daemon, and 3
+  config-provider tests; `openapi-to-rust --check`, `npm test`, `npm run typecheck` and
+  `npm run build` pass. Smoke-tested end to end: control plane + daemon + `vite preview`, config
+  PUT reached the daemon, and the resulting usage event was listed by `/v1/usage/events`
 - POC demonstrates centralized config distribution without sending inference traffic through the control plane
 
 ## Build & Run
@@ -120,13 +130,16 @@ cargo install --locked openapi-to-rust
 # Regenerate bindings after editing contract/openapi.yaml
 scripts/generate-types.sh
 
-# Dashboard (only needed when changing the frontend or the contract)
-cd web && npm install && npm run build     # writes web/dist/, embedded by rust-embed
+# Control plane (API only)
+cargo run -p control-plane                 # http://localhost:4000/v1/status
 
-# Backend
-cargo run -p control-plane                 # http://localhost:3000/
+# Dashboard (separate client; proxies /v1 to the control plane)
+cd web && npm install && npm run dev       # http://127.0.0.1:5173/
+cd web && npm run build && npm run preview # production bundle, same address
+
+# Daemon
 cargo build --release -p daemon            # target/release/daemon
-target/release/daemon --cp ws://127.0.0.1:4000/control --config daemon/config.example.toml
+target/release/daemon --config daemon/config.example.toml
 
 # Checks
 cargo test --workspace                     # contract drift guard
@@ -135,16 +148,17 @@ scripts/generate-types.sh --check          # committed bindings are current
 cd web && npm test && npm run typecheck
 ```
 
-`web/dist/` is git-ignored apart from a marker file, so `cargo build` works in a
-fresh checkout before the frontend is ever built: the API is fully functional and
-`/` serves a "dashboard not built" page explaining the command to run.
+The Rust build does not depend on the frontend: `web/dist/` is git-ignored build output.
 
 ### Daemon configuration
 
-The daemon is a standalone binary. `--cp` sets the reachable control-plane
-WebSocket endpoint; `--config` points to a daemon-local TOML file (see
-`daemon/config.example.toml`). Its API listener defaults to `0.0.0.0:0`, so the
-OS selects an available port and the daemon logs the chosen address.
+The daemon is a standalone binary with its own TOML config, separate from the
+control-plane/web config. It reads `./config.toml` when present, or a file
+selected by `--config`. CLI options override environment variables, which
+override TOML settings and built-in defaults. The control-plane URL is required
+and can be set with `--cp`, `CONTROL_PLANE_URL`, or the TOML `cp` setting. Its
+API listener defaults to `127.0.0.1:0`, so it is local-only; the OS selects an
+available port and the daemon logs the chosen address.
 `DAEMON_API_KEYS` optionally supplies comma-separated client keys.
 
 | Variable | Purpose |
@@ -160,15 +174,15 @@ OS selects an available port and the daemon logs the chosen address.
 ## TODOs (Next Steps)
 
 **Phase 2 — make the control-plane management API usable** (in progress next)
-1. **Contract-first resource CRUD**, replacing the single blob push: `GET/POST /api/models`,
-   `GET/PUT/DELETE /api/models/{model_name}`, `GET /api/daemons`, `GET /api/daemons/{connection_id}`,
-   `POST /api/daemons/{connection_id}/command`, and paginated `GET /api/telemetry`.
-   Keep `POST /api/config` as a deprecated bulk operation.
+1. **Contract-first resources**: ✅ v1 API done (`/v1/config`, `/v1/daemons`, paginated
+   `/v1/usage/events`). Still open: per-model CRUD (`/v1/models/{model_name}`), daemon commands,
+   config history/rollback, and enforcing the declared bearer auth (ADR 0001 step 2).
 2. **Secrets**: `parameters.api_key` is plaintext today, in the contract, in memory, and in the
    WebSocket broadcast. Make it `writeOnly` and never echo it; prefer `api_key_env`.
 3. **Virtual keys**: control-plane-issued client keys, replacing the daemon-local
    `DAEMON_API_KEYS` scaffolding from Phase 1.
-4. **Persistence** (SQLite) so models and keys survive a control-plane restart.
+4. **Persistence** (PostgreSQL, ADR 0001 steps 3–4) behind the `MemoryStore` API so config,
+   presence, and usage survive restarts and multiple instances can run.
 5. **Desired vs applied**: daemon sends a config ack so the dashboard shows in-sync/pending.
 6. **Dashboard**: model list + form instead of the raw-JSON editor, key management, telemetry filters.
 

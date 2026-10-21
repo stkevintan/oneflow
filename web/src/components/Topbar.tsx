@@ -1,9 +1,9 @@
-import type { ConnectionState } from "../api/useStatus";
-import type { ServerInfo } from "../api/client";
+import type { ConnectionState } from "../api/useDashboard";
+import type { StatusResponse } from "../api/client";
 import { formatUptime } from "../lib/format";
 
 interface TopbarProps {
-  server: ServerInfo | null;
+  server: StatusResponse | null;
   connection: ConnectionState;
   onRefresh: () => void;
 }

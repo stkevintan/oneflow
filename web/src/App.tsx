@@ -1,4 +1,4 @@
-import { useStatus } from "./api/useStatus";
+import { RECENT_USAGE_LIMIT, useDashboard } from "./api/useDashboard";
 import { Card } from "./components/Card";
 import { ConfigEditor } from "./components/ConfigEditor";
 import { DaemonTable } from "./components/DaemonTable";
@@ -6,11 +6,11 @@ import { TelemetryTable } from "./components/TelemetryTable";
 import { Topbar } from "./components/Topbar";
 
 export default function App() {
-  const { status, error, connection, refresh } = useStatus();
+  const { snapshot, error, connection, refresh } = useDashboard();
 
   return (
     <div className="min-h-screen bg-slate-950">
-      <Topbar server={status?.server ?? null} connection={connection} onRefresh={refresh} />
+      <Topbar server={snapshot?.status ?? null} connection={connection} onRefresh={refresh} />
 
       <main className="mx-auto flex max-w-[1400px] flex-col gap-5 px-7 py-6">
         {error ? (
@@ -26,21 +26,21 @@ export default function App() {
           title="Connected daemons"
           badge={
             <span className="rounded-full border border-slate-700 bg-slate-800 px-2 py-0.5 text-xs font-medium normal-case tracking-normal text-slate-400">
-              {status?.daemons.length ?? 0}
+              {snapshot?.daemons.length ?? 0}
             </span>
           }
         >
-          <DaemonTable daemons={status?.daemons ?? []} />
+          <DaemonTable daemons={snapshot?.daemons ?? []} />
         </Card>
 
         <Card
-          title="Recent telemetry"
-          hint="Latest 25 events across all daemons"
+          title="Recent usage"
+          hint={`Latest ${RECENT_USAGE_LIMIT} events across all daemons`}
         >
-          <TelemetryTable events={status?.telemetry ?? []} />
+          <TelemetryTable events={snapshot?.usage ?? []} limit={RECENT_USAGE_LIMIT} />
         </Card>
 
-        <ConfigEditor config={status?.config ?? null} onPushed={refresh} />
+        <ConfigEditor config={snapshot?.config ?? null} onPushed={refresh} />
       </main>
     </div>
   );

@@ -18,6 +18,10 @@ pub struct ServiceConfig {
 pub struct ControlPlaneConfig {
     pub bind_addr: String,
     pub websocket_url: String,
+    /// Browser origins allowed to call the `/v1` API cross-origin. Empty means
+    /// same-origin only (for example through the web dev/preview proxy).
+    #[serde(default)]
+    pub cors_allowed_origins: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -64,6 +68,28 @@ mod tests {
             "ws://127.0.0.1:4000/control"
         );
         assert_eq!(config.web.addr, "127.0.0.1:5173");
+        assert!(config.control_plane.cors_allowed_origins.is_empty());
+    }
+
+    #[test]
+    fn parses_cors_allowed_origins() {
+        let config: ServiceConfig = toml::from_str(
+            r#"
+                [control_plane]
+                bind_addr = "0.0.0.0:4000"
+                websocket_url = "ws://127.0.0.1:4000/control"
+                cors_allowed_origins = ["http://127.0.0.1:5173", "tauri://localhost"]
+
+                [web]
+                addr = "127.0.0.1:5173"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.control_plane.cors_allowed_origins,
+            ["http://127.0.0.1:5173", "tauri://localhost"]
+        );
     }
 
     #[test]

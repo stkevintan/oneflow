@@ -4,7 +4,7 @@
  */
 
 export interface paths {
-    "/api/status": {
+    "/v1/health": {
         parameters: {
             query?: never;
             header?: never;
@@ -12,11 +12,26 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Read the current control plane status
-         * @description Returns server metadata, every connected daemon connection, the recent
-         *     telemetry ring buffer and the configuration currently being pushed to
-         *     daemons.
+         * Liveness probe
+         * @description Unauthenticated. Returns 200 while the process can serve requests.
          */
+        get: operations["getHealth"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Server summary */
         get: operations["getStatus"];
         put?: never;
         post?: never;
@@ -26,21 +41,80 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/config": {
+    "/v1/config": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get?: never;
-        put?: never;
+        /** Read the desired model configuration */
+        get: operations["getConfig"];
         /**
-         * Replace and broadcast the model configuration
-         * @description Stores the configuration as the new desired state and broadcasts it to
-         *     every connected daemon. Newly connected daemons receive it on connect.
+         * Replace the desired model configuration
+         * @description Stores the configuration as the new desired state and pushes it to
+         *     every connected daemon. Daemons that connect later receive it on
+         *     connect. The whole configuration is replaced; models absent from the
+         *     body are removed from every daemon.
          */
-        post: operations["pushConfig"];
+        put: operations["putConfig"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/daemons": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List connected daemons */
+        get: operations["listDaemons"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/daemons/{connection_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read one daemon connection */
+        get: operations["getDaemon"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/usage/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List recent usage events, newest first
+         * @description Cursor-paginated. Pass `next_cursor` from a page as `cursor` to read
+         *     the next (older) page. The control plane retains a bounded history, so
+         *     old events eventually disappear.
+         */
+        get: operations["listUsageEvents"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -51,24 +125,51 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        StatusResponse: {
-            server: components["schemas"]["ServerInfo"];
-            /** @description One entry per live WebSocket connection. */
-            daemons: components["schemas"]["DaemonRecord"][];
-            /** @description Most recent telemetry events, oldest first (capped at 200). */
-            telemetry: components["schemas"]["TelemetryRecord"][];
-            config: components["schemas"]["ConfigUpdate"];
+        HealthResponse: {
+            /** @description Always `ok` when the service responds. */
+            status: string;
+            /** @description Control-plane build version. */
+            version: string;
         };
-        ServerInfo: {
-            /** @description Control plane build version. */
+        StatusResponse: {
+            /** @description Control-plane build version. */
             version: string;
             /** Format: int64 */
             uptime_seconds: number;
+            /** Format: int64 */
             connected_daemons: number;
+            /** @description Version label of the desired configuration. */
             config_version: string;
         };
-        DaemonRecord: {
-            /** @description Identifier for this WebSocket connection. */
+        ModelConfigSet: {
+            /** @description Non-empty version label shown to operators and applied by daemons. */
+            version: string;
+            models: components["schemas"]["ModelConfig"][];
+        };
+        ModelConfig: {
+            /** @description Model identifier clients send to the daemon. Must be non-empty. */
+            model_name: string;
+            /** @description Provider adapter, for example `custom_openai`. */
+            provider: string;
+            /**
+             * Format: uri
+             * @description Upstream base URL, for example `https://api.deepseek.com/v1`. Must be non-empty.
+             */
+            api_base: string;
+            /**
+             * @description Free-form provider options. `upstream_model` rewrites the model id
+             *     sent upstream; `api_key_env` names an environment variable holding
+             *     the upstream credential on the daemon host.
+             */
+            parameters: {
+                [key: string]: string;
+            };
+        };
+        DaemonList: {
+            items: components["schemas"]["Daemon"][];
+        };
+        Daemon: {
+            /** @description Identifier for this control-channel connection. */
             connection_id: string;
             /** @description Null until the daemon sends its registration message. */
             daemon_id: string | null;
@@ -86,6 +187,7 @@ export interface components {
              * @description Unix timestamp in seconds of the last message received.
              */
             last_seen: number;
+            /** Format: int64 */
             active_requests: number;
             loaded_models: string[];
             /** Format: int64 */
@@ -97,63 +199,76 @@ export interface components {
             /** Format: int64 */
             total_completion_tokens: number;
         };
-        TelemetryRecord: {
-            daemon_id: string;
-            model_name: string;
-            prompt_tokens: number;
-            completion_tokens: number;
-            success: boolean;
-            /**
-             * Format: int64
-             * @description Unix timestamp in seconds, stamped by the control plane on arrival.
-             */
-            received_at: number;
+        UsageEventPage: {
+            /** @description Newest first. */
+            items: components["schemas"]["UsageEvent"][];
+            /** @description Cursor for the next (older) page, or null when there are no more events. */
+            next_cursor: string | null;
+        };
+        UsageEvent: {
             /** @description Daemon-generated id, echoed to the client in `x-daemon-request-id`. */
             request_id: string;
+            daemon_id: string;
+            model_name: string;
+            /** Format: int64 */
+            prompt_tokens: number;
+            /** Format: int64 */
+            completion_tokens: number;
+            /**
+             * @description False when the upstream returned no `usage` object. The token counts
+             *     are then zero because they are unknown, not because they are zero.
+             */
+            usage_reported: boolean;
+            success: boolean;
+            /** @description Upstream HTTP status, or null when no response was received. */
+            status_code: number | null;
             /**
              * Format: int64
              * @description Wall-clock duration of the upstream call as observed by the daemon.
              */
             latency_ms: number;
-            /** @description Upstream HTTP status, or null when no response was received. */
-            status_code: number | null;
             /** @description Whether the client requested a streaming response. */
             streamed: boolean;
             /**
-             * @description False when the upstream returned no `usage` object. In that case the token
-             *     counts are zero because they are unknown, not because they are zero.
+             * Format: int64
+             * @description Unix timestamp in seconds, stamped by the control plane on arrival.
              */
-            usage_reported: boolean;
-        };
-        ModelConfig: {
-            /** @description Model identifier clients send to the daemon. */
-            model_name: string;
-            /** @description Provider adapter, for example `custom_openai`. */
-            provider: string;
-            /**
-             * Format: uri
-             * @description Upstream base URL, for example `https://api.deepseek.com/v1`.
-             */
-            api_base: string;
-            /**
-             * @description Free-form provider options. `upstream_model` rewrites the model id
-             *     sent upstream; `api_key_env` names an environment variable holding
-             *     the upstream credential.
-             */
-            parameters: {
-                [key: string]: string;
-            };
-        };
-        ConfigUpdate: {
-            /** @description Opaque version label shown in the dashboard and applied by daemons. */
-            version: string;
-            models: components["schemas"]["ModelConfig"][];
+            received_at: number;
         };
         ErrorResponse: {
+            /** @description Human-readable error message. */
             error: string;
         };
     };
-    responses: never;
+    responses: {
+        /** @description The request is invalid */
+        BadRequest: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description Missing or invalid bearer token */
+        Unauthorized: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description The resource does not exist */
+        NotFound: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+    };
     parameters: never;
     requestBodies: never;
     headers: never;
@@ -161,6 +276,26 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    getHealth: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The service is alive */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HealthResponse"];
+                };
+            };
+        };
+    };
     getStatus: {
         parameters: {
             query?: never;
@@ -170,7 +305,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Status snapshot */
+            /** @description Server summary */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -179,9 +314,31 @@ export interface operations {
                     "application/json": components["schemas"]["StatusResponse"];
                 };
             };
+            401: components["responses"]["Unauthorized"];
         };
     };
-    pushConfig: {
+    getConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The configuration currently distributed to daemons */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelConfigSet"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    putConfig: {
         parameters: {
             query?: never;
             header?: never;
@@ -190,7 +347,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ConfigUpdate"];
+                "application/json": components["schemas"]["ModelConfigSet"];
             };
         };
         responses: {
@@ -200,18 +357,88 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ConfigUpdate"];
+                    "application/json": components["schemas"]["ModelConfigSet"];
                 };
             };
-            /** @description The configuration is structurally invalid */
-            400: {
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    listDaemons: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One entry per live control-channel connection */
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
+                    "application/json": components["schemas"]["DaemonList"];
                 };
             };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    getDaemon: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Identifier assigned by the control plane when the daemon connected. */
+                connection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The daemon connection */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Daemon"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listUsageEvents: {
+        parameters: {
+            query?: {
+                /** @description Maximum number of events to return. */
+                limit?: number;
+                /** @description Opaque cursor from a previous page's `next_cursor`. */
+                cursor?: string;
+                /** @description Only events reported by this daemon. */
+                daemon_id?: string;
+                /** @description Only events for this model. */
+                model_name?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of usage events */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UsageEventPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
         };
     };
 }

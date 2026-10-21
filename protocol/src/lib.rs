@@ -56,8 +56,8 @@ pub enum ControlMessage {
     },
 }
 
-impl From<ConfigUpdate> for ControlMessage {
-    fn from(config: ConfigUpdate) -> Self {
+impl From<ModelConfigSet> for ControlMessage {
+    fn from(config: ModelConfigSet) -> Self {
         ControlMessage::ConfigUpdate {
             models: config.models,
             version: config.version,
@@ -90,7 +90,7 @@ pub struct Heartbeat {
 }
 
 /// Per-request telemetry reported by a daemon after it calls an upstream
-/// provider. The control plane accumulates these into [`TelemetryRecord`].
+/// provider. The control plane stores these as [`UsageEvent`]s.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Telemetry {
     pub daemon_id: String,
@@ -107,7 +107,7 @@ pub struct Telemetry {
     pub usage_reported: bool,
 }
 
-impl From<Telemetry> for TelemetryRecord {
+impl From<Telemetry> for UsageEvent {
     fn from(telemetry: Telemetry) -> Self {
         // Written as an exhaustive struct literal on purpose: a field added to
         // either side of the contract becomes a compile error here rather than
