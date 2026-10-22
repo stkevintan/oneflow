@@ -58,6 +58,10 @@ declared (with `/v1/health` exempt) but not yet enforced.
 
 ## Control-channel messages
 
+Proposed virtual-key management and additional control messages are specified
+separately in [virtual-keys.md](./virtual-keys.md). They are not implemented,
+not part of the live API contract, and not inputs to the current generators.
+
 Every frame is a JSON text frame with a `type` discriminator (`#[serde(tag = "type")]`).
 
 ### Control plane → daemon: `ControlMessage`

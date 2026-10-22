@@ -82,6 +82,10 @@ stateDiagram-v2
 
 ### Client authentication (`require_api_key`)
 
+For the planned replacement with managed virtual keys, model permissions, and
+bounded offline leases, see [virtual-keys.md](./virtual-keys.md). The behavior
+below remains the current implementation.
+
 If `DAEMON_API_KEYS` (comma-separated) is set, `/v1/*` requires
 `Authorization: Bearer <key>`. Keys are compared in constant time. A failure
 returns 401 in OpenAI error shape. If the variable is unset, the API is open.
