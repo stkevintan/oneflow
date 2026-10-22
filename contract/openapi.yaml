@@ -121,6 +121,41 @@ paths:
           $ref: "#/components/responses/Unauthorized"
 
   /v1/daemons:
+    post:
+      operationId: createDaemon
+      summary: Provision a daemon credential
+      description: |
+        Requires PostgreSQL-backed mode and administrator authentication.
+        The caller chooses a unique daemon ID. Returns a random token once;
+        only its SHA-256 hash is stored. Duplicate IDs return 409, including
+        revoked IDs. Rotate a credential if its creation response is lost.
+        All credential responses use Cache-Control no-store.
+      tags: [daemons]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateDaemonRequest"
+      responses:
+        "201":
+          description: Provisioned; save the token securely
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IssuedDaemonCredential"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Daemon ID already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/Unavailable"
     get:
       operationId: listDaemons
       summary: List connected daemons
@@ -134,6 +169,91 @@ paths:
                 $ref: "#/components/schemas/DaemonList"
         "401":
           $ref: "#/components/responses/Unauthorized"
+
+  /v1/daemons/credentials:
+    get:
+      operationId: listDaemonCredentials
+      summary: List provisioned daemons, including offline and revoked credentials
+      description: |
+        Administrator-only in PostgreSQL-backed mode; otherwise 503.
+        Metadata only: no token or token hash is returned. Connection presence
+        remains available separately at GET /v1/daemons and is process-local.
+        Responses use Cache-Control no-store.
+      tags: [daemons]
+      responses:
+        "200":
+          description: Provisioned daemon credential metadata, sorted by ID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DaemonCredentialList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/daemons/{daemon_id}/rotate:
+    post:
+      operationId: rotateDaemonCredential
+      summary: Replace a daemon token and reactivate a revoked daemon
+      description: |
+        Returns the replacement token once, with Cache-Control no-store.
+        The previous token cannot reconnect. Existing sessions are rechecked
+        before processing messages or sending updates, and at least every
+        5 seconds. In-flight messages may finish. Disconnected daemons can
+        serve cached inference permissions until their existing policy lease
+        expires (at most 300 seconds plus clock skew); rotation does not
+        instantly disable inference on the daemon host.
+      tags: [daemons]
+      parameters:
+        - name: daemon_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Replacement credential; deploy the token to the daemon
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IssuedDaemonCredential"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/daemons/{daemon_id}/revoke:
+    post:
+      operationId: revokeDaemonCredential
+      summary: Revoke a daemon credential
+      description: |
+        Idempotent. Metadata is retained. Blocks new control connections;
+        existing sessions are fenced as described for rotation. Cached
+        inference permissions remain bounded by the existing policy lease.
+        Responses use Cache-Control no-store.
+      tags: [daemons]
+      parameters:
+        - name: daemon_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Revoked credential metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DaemonCredential"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
 
   /v1/daemons/{connection_id}:
     get:
@@ -497,6 +617,48 @@ components:
           items:
             type: string
           description: Hashes only; plaintext inputs are never echoed.
+    CreateDaemonRequest:
+      type: object
+      additionalProperties: false
+      required: [daemon_id]
+      properties:
+        daemon_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9._-]+$"
+    DaemonCredential:
+      type: object
+      required: [daemon_id, created_at, rotated_at, revoked_at]
+      properties:
+        daemon_id:
+          type: string
+        created_at:
+          type: integer
+          format: int64
+        rotated_at:
+          type: [integer, "null"]
+          format: int64
+        revoked_at:
+          type: [integer, "null"]
+          format: int64
+    IssuedDaemonCredential:
+      type: object
+      required: [credential, token]
+      properties:
+        credential:
+          $ref: "#/components/schemas/DaemonCredential"
+        token:
+          type: string
+          description: One-time plaintext control-channel token. Never log it.
+    DaemonCredentialList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/DaemonCredential"
     HealthResponse:
       type: object
       required: [status, version]

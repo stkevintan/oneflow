@@ -32,7 +32,22 @@ pub fn create_app(state: AppState, cors_allowed_origins: Vec<HeaderValue>) -> Ro
         .route("/v1/health", get(health))
         .route("/v1/status", get(status))
         .route("/v1/config", get(get_config).put(put_config))
-        .route("/v1/daemons", get(list_daemons))
+        .route(
+            "/v1/daemons",
+            get(list_daemons).post(crate::daemon_credentials::create),
+        )
+        .route(
+            "/v1/daemons/credentials",
+            get(crate::daemon_credentials::list),
+        )
+        .route(
+            "/v1/daemons/:connection_id/rotate",
+            post(crate::daemon_credentials::rotate),
+        )
+        .route(
+            "/v1/daemons/:connection_id/revoke",
+            post(crate::daemon_credentials::revoke),
+        )
         .route("/v1/daemons/:connection_id", get(get_daemon))
         .route("/v1/usage/events", get(list_usage_events))
         .route("/key/generate", post(crate::key_api::generate))
@@ -58,11 +73,11 @@ pub fn create_app(state: AppState, cors_allowed_origins: Vec<HeaderValue>) -> Ro
 
 async fn authorize_management(
     State(state): State<AppState>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     let path = request.uri().path();
-    let is_virtual_key_endpoint = path.starts_with("/key/");
+    let is_virtual_key_endpoint = path.starts_with("/key/") || path.starts_with("/v1/daemons");
     if let Some(mode) = &state.virtual_key_mode {
         if path == "/control" {
             let identity = request
@@ -77,9 +92,25 @@ async fn authorize_management(
                 .filter(|token| {
                     !token.is_empty() && !token.bytes().any(|byte| byte.is_ascii_whitespace())
                 });
-            let valid = identity
-                .and_then(|identity| mode.daemon_tokens.get(identity).zip(token))
-                .is_some_and(|(expected, supplied)| constant_time_token_eq(expected, supplied));
+            let identity = identity.zip(token).map(|(id, token)| {
+                crate::daemon_credentials::AuthenticatedDaemon {
+                    daemon_id: id.to_string(),
+                    token_hash: crate::daemon_credentials::token_hash(token),
+                }
+            });
+            let valid = match &identity {
+                Some(identity) => match mode.store.daemon_credential_valid(identity).await {
+                    Ok(valid) => valid,
+                    Err(err) => {
+                        tracing::error!(error = %err, "daemon authentication storage failure");
+                        return error(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "daemon authentication is unavailable",
+                        );
+                    }
+                },
+                None => false,
+            };
             if !valid {
                 return (
                     StatusCode::UNAUTHORIZED,
@@ -88,6 +119,9 @@ async fn authorize_management(
                 )
                     .into_response();
             }
+            request
+                .extensions_mut()
+                .insert(identity.expect("validated daemon identity"));
         } else if path != "/v1/health" {
             let valid = request
                 .headers()
@@ -502,7 +536,7 @@ mod contract_tests {
             let Some(operation) = item.get("get") else {
                 continue;
             };
-            if path.starts_with("/key/") {
+            if path.starts_with("/key/") || path == "/v1/daemons/credentials" {
                 let (status, body) = call(app().await, "get", path, None).await;
                 assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "GET {path}");
                 assert!(body["error"].is_string());
@@ -610,12 +644,16 @@ mod contract_tests {
     }
 
     #[tokio::test]
-    async fn virtual_key_routes_report_unavailable_without_opt_in_storage() {
+    async fn credential_routes_report_unavailable_without_opt_in_storage() {
         for (method, path, body) in [
             ("get", "/key/list", None),
             ("post", "/key/generate", Some("{}")),
             ("get", "/key/info?key=unknown", None),
             ("post", "/key/delete", Some("{\"keys\":[]}")),
+            ("post", "/v1/daemons", Some("{\"daemon_id\":\"test\"}")),
+            ("get", "/v1/daemons/credentials", None),
+            ("post", "/v1/daemons/test/rotate", None),
+            ("post", "/v1/daemons/test/revoke", None),
         ] {
             let (status, response) = call(app().await, method, path, body).await;
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{method} {path}");

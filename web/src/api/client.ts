@@ -7,6 +7,9 @@ export type ModelConfig = components["schemas"]["ModelConfig"];
 export type ModelConfigSet = components["schemas"]["ModelConfigSet"];
 export type Daemon = components["schemas"]["Daemon"];
 export type DaemonList = components["schemas"]["DaemonList"];
+export type DaemonCredential = components["schemas"]["DaemonCredential"];
+export type DaemonCredentialList = components["schemas"]["DaemonCredentialList"];
+export type IssuedDaemonCredential = components["schemas"]["IssuedDaemonCredential"];
 export type UsageEvent = components["schemas"]["UsageEvent"];
 export type UsageEventPage = components["schemas"]["UsageEventPage"];
 export type ErrorResponse = components["schemas"]["ErrorResponse"];
@@ -93,6 +96,28 @@ export function putConfig(config: ModelConfigSet, signal?: AbortSignal): Promise
 /** `GET /v1/daemons` — connected daemons. */
 export function listDaemons(signal?: AbortSignal): Promise<DaemonList> {
   return requestJson<DaemonList>("/v1/daemons", { signal });
+}
+
+export function listDaemonCredentials(signal?: AbortSignal): Promise<DaemonCredentialList> {
+  return requestJson<DaemonCredentialList>("/v1/daemons/credentials", { signal, cache: "no-store" });
+}
+
+export function createDaemon(daemonId: string): Promise<IssuedDaemonCredential> {
+  return requestJson<IssuedDaemonCredential>("/v1/daemons", {
+    method: "POST", body: JSON.stringify({ daemon_id: daemonId }), cache: "no-store",
+  });
+}
+
+export function rotateDaemonCredential(daemonId: string): Promise<IssuedDaemonCredential> {
+  return requestJson<IssuedDaemonCredential>(`/v1/daemons/${encodeURIComponent(daemonId)}/rotate`, {
+    method: "POST", cache: "no-store",
+  });
+}
+
+export function revokeDaemonCredential(daemonId: string): Promise<DaemonCredential> {
+  return requestJson<DaemonCredential>(`/v1/daemons/${encodeURIComponent(daemonId)}/revoke`, {
+    method: "POST", cache: "no-store",
+  });
 }
 
 /** `GET /v1/daemons/{connection_id}` — one daemon connection. */

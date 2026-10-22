@@ -1,9 +1,0 @@
-[control_plane]
-bind_addr = "0.0.0.0:4000"
-websocket_url = "ws://127.0.0.1:4000/control"
-# Browser origins allowed to call /v1 cross-origin. The web dev and preview
-# servers proxy /v1, so they do not need an entry here.
-cors_allowed_origins = []
-
-[web]
-addr = "127.0.0.1:5173"

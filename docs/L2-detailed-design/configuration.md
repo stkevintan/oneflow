@@ -1,6 +1,8 @@
 # L2 — Configuration
 
-The control plane and web dev server share the repository's `config.toml`. The
+The control plane and web dev server share a user-created, Git-ignored `config.toml`.
+Copy the tracked [`config.example.toml`](../../config.example.toml) before starting
+either service. Keep local secrets out of Git and restrict file permissions. The
 daemon is a separate executable and uses a standalone config file on its host.
 
 | Consumer | Source | Loader |
@@ -19,6 +21,10 @@ daemons; see [protocol.md](./protocol.md).
 bind_addr = "0.0.0.0:4000"                      # control-plane listener
 websocket_url = "ws://127.0.0.1:4000/control"   # used by the web /v1 proxy
 cors_allowed_origins = []                       # browser origins allowed cross-origin
+# Optional; supply both to enable authenticated virtual-key mode:
+# database_url = "postgres://USER:PASSWORD@HOST:5432/DATABASE?sslmode=require"
+# admin_token = "REPLACE_WITH_RANDOM_ADMIN_TOKEN_AT_LEAST_32_BYTES"
+# Provision daemon credentials through the dashboard or POST /v1/daemons.
 
 [web]
 addr = "127.0.0.1:5173"                         # Vite dev and preview servers
@@ -29,7 +35,7 @@ addr = "127.0.0.1:5173"                         # Vite dev and preview servers
 
 ```rust
 pub struct ServiceConfig {
-    pub control_plane: ControlPlaneConfig, // bind_addr, websocket_url, cors_allowed_origins
+    pub control_plane: ControlPlaneConfig, // addresses, CORS, optional virtual-key settings
     pub web: WebConfig,                    // addr
 }
 
@@ -48,6 +54,15 @@ ConfigProvider::load()           // $LLMCP_CONFIG or ./config.toml
   proxy and need no entry.
 - The web bundle itself reads `VITE_CONTROL_PLANE_URL` at build time (see
   [web.md](./web.md#base-url)) when it is hosted on another origin.
+- `database_url` and `admin_token` enable virtual-key mode.
+  `ONEFLOW_DATABASE_URL` and `ONEFLOW_ADMIN_TOKEN`
+  override their respective TOML settings. After resolution both settings
+  are required, otherwise startup fails; no settings retains legacy mode.
+  Empty or invalid credentials are rejected, not replaced by file defaults.
+  PostgreSQL migrations run on startup. See [deployment](../virtual-keys.md).
+- Daemon credentials are provisioned and managed through the dashboard/API and
+  persisted as hashes in PostgreSQL. Static `daemon_tokens` and
+  `ONEFLOW_DAEMON_TOKENS` are rejected; remove them and provision new tokens.
 
 ## Daemon configuration
 
@@ -88,10 +103,10 @@ All keys are optional; unknown keys are rejected.
 
 ### Environment variables
 
-Virtual-key deployment additionally uses `ONEFLOW_DATABASE_URL`,
-`ONEFLOW_ADMIN_TOKEN`, and `ONEFLOW_DAEMON_TOKENS` on the control plane, and
+Virtual-key deployment may override the control-plane TOML settings with
+`ONEFLOW_DATABASE_URL` and `ONEFLOW_ADMIN_TOKEN`, and uses
 `ONEFLOW_DAEMON_TOKEN` on each daemon. See
-[deployment and usage](../virtual-keys.md). Keep these secrets out of TOML.
+[deployment and usage](../virtual-keys.md). Keep all secrets out of tracked files.
 
 Resolution order: **CLI option → environment variable → TOML → built-in
 default**. The control-plane URL is required and can be supplied by `--cp`,
@@ -115,6 +130,7 @@ default**. The control-plane URL is required and can be supplied by `--cp`,
 ## Known gaps
 
 - No hot reload: both services read their files only at startup.
-- The control plane's model configuration is not loaded from a file, so it
-  resets to the built-in default on restart.
-- TLS and authentication settings do not exist yet.
+- Legacy-mode model configuration resets to the built-in default on restart;
+  virtual-key mode persists it in PostgreSQL.
+- Native TLS termination is not implemented; remote virtual-key deployments
+  require an HTTPS/WSS reverse proxy.

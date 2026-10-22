@@ -8,9 +8,8 @@ use std::time::Duration;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        Extension, State,
     },
-    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use protocol::{ControlMessage, DaemonMessage, VirtualKeyPolicySnapshot};
@@ -18,56 +17,44 @@ use tokio::sync::broadcast;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::{constant_time_token_eq, now_ts, AppState};
+use crate::{daemon_credentials::AuthenticatedDaemon, now_ts, AppState};
 
 const VIRTUAL_KEY_CAPABILITY: &str = "virtual-keys-v1";
 
 pub async fn ws_handler(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    identity: Option<Extension<AuthenticatedDaemon>>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let daemon_id = if let Some(mode) = &state.virtual_key_mode {
-        let identity = headers
-            .get("x-oneflow-daemon-id")
-            .and_then(|value| value.to_str().ok());
-        let token = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "));
-        let Some(identity) = identity else {
-            return unauthorized();
-        };
-        let Some(token) = token.filter(|token| {
-            !token.is_empty() && !token.bytes().any(|byte| byte.is_ascii_whitespace())
-        }) else {
-            return unauthorized();
-        };
-        let Some(expected) = mode.daemon_tokens.get(identity) else {
-            return unauthorized();
-        };
-        if !constant_time_token_eq(expected, token) {
-            return unauthorized();
-        }
-        Some(identity.to_string())
-    } else {
-        None
-    };
-
-    ws.on_upgrade(move |socket| handle_socket(socket, state, daemon_id))
+    ws.on_upgrade(move |socket| handle_socket(socket, state, identity.map(|Extension(id)| id)))
         .into_response()
 }
 
-fn unauthorized() -> Response {
-    (
-        StatusCode::UNAUTHORIZED,
-        [(header::WWW_AUTHENTICATE, "Bearer")],
-        "unauthorized",
-    )
-        .into_response()
+async fn credential_valid(state: &AppState, identity: Option<&AuthenticatedDaemon>) -> bool {
+    match (&state.virtual_key_mode, identity) {
+        (None, None) => true,
+        (Some(mode), Some(identity)) => match mode.store.daemon_credential_valid(identity).await {
+            Ok(valid) => valid,
+            Err(err) => {
+                warn!(error = %err, "failed to revalidate daemon credential; closing control channel");
+                false
+            }
+        },
+        _ => false,
+    }
 }
 
-async fn handle_socket(mut socket: WebSocket, state: AppState, daemon_identity: Option<String>) {
+async fn handle_socket(
+    mut socket: WebSocket,
+    state: AppState,
+    identity: Option<AuthenticatedDaemon>,
+) {
+    if !credential_valid(&state, identity.as_ref()).await {
+        return;
+    }
+    let daemon_identity = identity
+        .as_ref()
+        .map(|identity| identity.daemon_id.as_str());
     let connection_id = Uuid::new_v4().to_string();
     info!(%connection_id, "Daemon connected via WebSocket");
 
@@ -82,6 +69,8 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, daemon_identity: 
         Duration::from_secs(60),
     );
     refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut credential_check = tokio::time::interval(Duration::from_secs(5));
+    credential_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     if registered {
         let initial = ControlMessage::from(state.store.config().await);
@@ -94,11 +83,14 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, daemon_identity: 
     loop {
         tokio::select! {
             incoming = socket.recv() => {
+                if !credential_valid(&state, identity.as_ref()).await {
+                    break;
+                }
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<DaemonMessage>(&text) {
                             Ok(DaemonMessage::Registration(registration)) => {
-                                if let Some(expected_id) = daemon_identity.as_deref() {
+                                if let Some(expected_id) = daemon_identity {
                                     if registration.daemon_id != expected_id
                                         || !registration.capabilities.iter().any(|capability| capability == VIRTUAL_KEY_CAPABILITY)
                                     {
@@ -153,7 +145,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, daemon_identity: 
                                 if !registered {
                                     continue;
                                 }
-                                if let Some(expected_id) = daemon_identity.as_deref() {
+                                if let Some(expected_id) = daemon_identity {
                                     let claimed_id = match &message {
                                         DaemonMessage::Heartbeat(heartbeat) => Some(heartbeat.daemon_id.as_str()),
                                         DaemonMessage::Telemetry(telemetry) => Some(telemetry.daemon_id.as_str()),
@@ -188,7 +180,15 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, daemon_identity: 
                     _ => {}
                 }
             }
+            _ = credential_check.tick(), if identity.is_some() => {
+                if !credential_valid(&state, identity.as_ref()).await {
+                    break;
+                }
+            }
             update = updates.recv() => {
+                if !credential_valid(&state, identity.as_ref()).await {
+                    break;
+                }
                 match update {
                     Ok(message) => {
                         if !registered {
@@ -211,6 +211,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, daemon_identity: 
                 }
             }
             _ = refresh.tick() => {
+                if !credential_valid(&state, identity.as_ref()).await {
+                    break;
+                }
                 if registered {
                     if let Some(mode) = &state.virtual_key_mode {
                         match mode.store.snapshot(now_ts()).await {
@@ -232,6 +235,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, daemon_identity: 
     }
 
     state.store.daemon_disconnected(&connection_id).await;
+    let _ = socket.send(Message::Close(None)).await;
     info!(%connection_id, "Daemon disconnected");
 }
 

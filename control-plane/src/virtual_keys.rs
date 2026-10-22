@@ -41,7 +41,7 @@ pub(crate) struct CreatedVirtualKey {
 }
 
 pub struct VirtualKeyStore {
-    pool: PgPool,
+    pub(crate) pool: PgPool,
 }
 
 impl VirtualKeyStore {

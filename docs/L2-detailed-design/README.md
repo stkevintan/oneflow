@@ -9,5 +9,5 @@ level of modules, data structures, and algorithms.
 | [control-plane.md](./control-plane.md) | Routes, shared state, broadcast, WebSocket lifecycle | `control-plane/src/` |
 | [daemon.md](./daemon.md) | CLI, control channel, inference pipeline, usage accounting | `daemon/src/` |
 | [web.md](./web.md) | Dashboard components, polling, build and embedding | `web/` |
-| [configuration.md](./configuration.md) | Shared `config.toml`, daemon TOML, environment variables | `config-provider/`, `config.toml`, `daemon/config.example.toml` |
+| [configuration.md](./configuration.md) | Shared local `config.toml`, daemon TOML, environment variables | `config-provider/`, `config.example.toml`, `daemon/config.example.toml` |
 | [virtual-keys.md](./virtual-keys.md) | Virtual-key lifecycle, model access, and offline leases | `contract/openapi.yaml`, `contract/virtual-key-control.schema.json` |

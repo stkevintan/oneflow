@@ -1,11 +1,11 @@
 mod api;
 mod control;
+mod daemon_credentials;
 mod key_api;
 mod store;
 mod virtual_keys;
 
 use std::{
-    collections::{HashMap, HashSet},
     net::SocketAddr,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -14,10 +14,6 @@ use std::{
 use anyhow::{Context, Result};
 use axum::http::HeaderValue;
 use protocol::ControlMessage;
-use serde::{
-    de::{MapAccess, Visitor},
-    Deserialize,
-};
 use subtle::ConstantTimeEq;
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
@@ -29,7 +25,6 @@ use virtual_keys::VirtualKeyStore;
 pub(crate) struct VirtualKeyMode {
     pub(crate) store: Arc<VirtualKeyStore>,
     pub(crate) admin_token: Arc<String>,
-    pub(crate) daemon_tokens: Arc<HashMap<String, String>>,
 }
 
 #[derive(Clone)]
@@ -49,40 +44,6 @@ pub(crate) fn now_ts() -> i64 {
 
 pub(crate) fn constant_time_token_eq(expected: &str, supplied: &str) -> bool {
     expected.as_bytes().ct_eq(supplied.as_bytes()).into()
-}
-
-struct StrictDaemonTokens(HashMap<String, String>);
-
-impl<'de> Deserialize<'de> for StrictDaemonTokens {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct TokenMapVisitor;
-
-        impl<'de> Visitor<'de> for TokenMapVisitor {
-            type Value = StrictDaemonTokens;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("an object with unique daemon IDs and string tokens")
-            }
-
-            fn visit_map<M>(self, mut map: M) -> std::result::Result<Self::Value, M::Error>
-            where
-                M: MapAccess<'de>,
-            {
-                let mut tokens = HashMap::new();
-                while let Some((daemon_id, token)) = map.next_entry::<String, String>()? {
-                    if tokens.insert(daemon_id, token).is_some() {
-                        return Err(serde::de::Error::custom("duplicate daemon ID"));
-                    }
-                }
-                Ok(StrictDaemonTokens(tokens))
-            }
-        }
-
-        deserializer.deserialize_map(TokenMapVisitor)
-    }
 }
 
 #[tokio::main]
@@ -109,7 +70,7 @@ async fn main() -> Result<()> {
 
     let (broadcast, _) = broadcast::channel(32);
     let fallback_config = default_config();
-    let virtual_key_mode = load_virtual_key_mode(&fallback_config).await?;
+    let virtual_key_mode = load_virtual_key_mode(&config.control_plane, &fallback_config).await?;
     let initial_config = match &virtual_key_mode {
         Some(mode) => mode.store.config().await?,
         None => fallback_config,
@@ -140,78 +101,68 @@ async fn main() -> Result<()> {
 }
 
 async fn load_virtual_key_mode(
+    config: &config_provider::ControlPlaneConfig,
     initial_config: &protocol::ModelConfigSet,
 ) -> Result<Option<Arc<VirtualKeyMode>>> {
-    let database_url = optional_env("ONEFLOW_DATABASE_URL")?;
-    let admin_token = optional_env("ONEFLOW_ADMIN_TOKEN")?;
-    let daemon_tokens = optional_env("ONEFLOW_DAEMON_TOKENS")?;
-    let configured = [
-        database_url.is_some(),
-        admin_token.is_some(),
-        daemon_tokens.is_some(),
-    ];
+    if std::env::var_os("ONEFLOW_DAEMON_TOKENS").is_some() {
+        anyhow::bail!("ONEFLOW_DAEMON_TOKENS is no longer supported; provision daemon credentials through POST /v1/daemons");
+    }
+    let Some((database_url, admin_token)) = resolve_virtual_key_settings(
+        config,
+        optional_env("ONEFLOW_DATABASE_URL")?,
+        optional_env("ONEFLOW_ADMIN_TOKEN")?,
+    )?
+    else {
+        return Ok(None);
+    };
+    let key_store = Arc::new(VirtualKeyStore::connect(&database_url, initial_config).await?);
+    Ok(Some(Arc::new(VirtualKeyMode {
+        store: key_store,
+        admin_token: Arc::new(admin_token),
+    })))
+}
+
+type VirtualKeySettings = (String, String);
+
+fn resolve_virtual_key_settings(
+    config: &config_provider::ControlPlaneConfig,
+    database_url: Option<String>,
+    admin_token: Option<String>,
+) -> Result<Option<VirtualKeySettings>> {
+    let database_url = database_url.or_else(|| config.database_url.clone());
+    let admin_token = admin_token.or_else(|| config.admin_token.clone());
+    let configured = [database_url.is_some(), admin_token.is_some()];
     if configured.iter().all(|value| !value) {
         return Ok(None);
     }
     if configured.iter().any(|value| !value) {
         anyhow::bail!(
-            "virtual-key mode requires ONEFLOW_DATABASE_URL, ONEFLOW_ADMIN_TOKEN, and ONEFLOW_DAEMON_TOKENS together"
+            "virtual-key mode requires control_plane.database_url and admin_token together (or ONEFLOW_DATABASE_URL and ONEFLOW_ADMIN_TOKEN overrides)"
         );
     }
 
     let admin_token = admin_token.expect("the setting was validated above");
-    validate_bearer_secret("ONEFLOW_ADMIN_TOKEN", &admin_token)?;
-    let daemon_tokens = serde_json::from_str::<StrictDaemonTokens>(
-        &daemon_tokens.expect("the setting was validated above"),
-    )
-    .context(
-        "ONEFLOW_DAEMON_TOKENS must be a JSON object with unique daemon IDs and string tokens",
-    )?
-    .0;
-    if daemon_tokens.is_empty() {
-        anyhow::bail!("ONEFLOW_DAEMON_TOKENS must contain at least one daemon credential");
+    validate_bearer_secret("administrator token", &admin_token)?;
+    if database_url
+        .as_ref()
+        .is_some_and(|url| url.trim().is_empty())
+    {
+        anyhow::bail!("database_url must not be empty");
     }
-    let mut unique_daemon_tokens = HashSet::new();
-    for (daemon_id, token) in &daemon_tokens {
-        if daemon_id.is_empty()
-            || daemon_id.len() > 128
-            || !daemon_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
-        {
-            anyhow::bail!("ONEFLOW_DAEMON_TOKENS contains an invalid daemon ID");
-        }
-        validate_bearer_secret("ONEFLOW_DAEMON_TOKENS entry", token)?;
-        if !unique_daemon_tokens.insert(token) {
-            anyhow::bail!("ONEFLOW_DAEMON_TOKENS must use a distinct token for each daemon ID");
-        }
-        if constant_time_token_eq(&admin_token, token) {
-            anyhow::bail!("administrator and daemon credentials must be distinct");
-        }
-    }
+    Ok(Some((
+        database_url.expect("the setting was validated above"),
+        admin_token,
+    )))
+}
 
-    fn optional_env(name: &str) -> Result<Option<String>> {
-        std::env::var_os(name)
-            .map(|value| {
-                value
-                    .into_string()
-                    .map_err(|_| anyhow::anyhow!("{name} must contain valid UTF-8"))
-            })
-            .transpose()
-    }
-
-    let key_store = Arc::new(
-        VirtualKeyStore::connect(
-            &database_url.expect("the setting was validated above"),
-            initial_config,
-        )
-        .await?,
-    );
-    Ok(Some(Arc::new(VirtualKeyMode {
-        store: key_store,
-        admin_token: Arc::new(admin_token),
-        daemon_tokens: Arc::new(daemon_tokens),
-    })))
+fn optional_env(name: &str) -> Result<Option<String>> {
+    std::env::var_os(name)
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("{name} must contain valid UTF-8"))
+        })
+        .transpose()
 }
 
 fn validate_bearer_secret(variable: &str, secret: &str) -> Result<()> {
@@ -289,5 +240,73 @@ async fn refresh_policy_snapshot(state: &AppState, key_store: &VirtualKeyStore) 
                 .send(ControlMessage::VirtualKeyPolicySnapshot(snapshot));
         }
         Err(err) => error!(error = %err, "failed to refresh virtual-key policy snapshot"),
+    }
+}
+
+#[cfg(test)]
+mod configuration_tests {
+    use super::*;
+
+    fn config() -> config_provider::ControlPlaneConfig {
+        config_provider::ControlPlaneConfig {
+            bind_addr: "127.0.0.1:4000".into(),
+            websocket_url: "ws://127.0.0.1:4000/control".into(),
+            cors_allowed_origins: vec![],
+            database_url: None,
+            admin_token: None,
+        }
+    }
+
+    fn configured() -> config_provider::ControlPlaneConfig {
+        config_provider::ControlPlaneConfig {
+            database_url: Some("postgres://localhost/oneflow".into()),
+            admin_token: Some("a".repeat(32)),
+            ..config()
+        }
+    }
+
+    #[test]
+    fn legacy_and_partial_configuration() {
+        assert!(resolve_virtual_key_settings(&config(), None, None)
+            .unwrap()
+            .is_none());
+        assert!(resolve_virtual_key_settings(
+            &config(),
+            Some("postgres://localhost/app".into()),
+            None
+        )
+        .is_err());
+        let mut partial = configured();
+        partial.admin_token = None;
+        assert!(resolve_virtual_key_settings(&partial, None, None).is_err());
+    }
+
+    #[test]
+    fn toml_settings_and_per_setting_environment_overrides() {
+        let config = configured();
+        let (url, admin) = resolve_virtual_key_settings(&config, None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(url, config.database_url.clone().unwrap());
+        assert_eq!(admin, "a".repeat(32));
+        let (url, admin) = resolve_virtual_key_settings(
+            &config,
+            Some("postgres://localhost/override".into()),
+            Some("b".repeat(32)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(url, "postgres://localhost/override");
+        assert_eq!(admin, "b".repeat(32));
+        let (_, admin) = resolve_virtual_key_settings(&config, None, Some("b".repeat(32)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(admin, "b".repeat(32));
+    }
+
+    #[test]
+    fn rejects_invalid_credentials_and_empty_overrides() {
+        assert!(resolve_virtual_key_settings(&configured(), Some(String::new()), None).is_err());
+        assert!(resolve_virtual_key_settings(&configured(), None, Some(String::new())).is_err());
     }
 }

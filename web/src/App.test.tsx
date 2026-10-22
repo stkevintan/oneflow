@@ -94,6 +94,7 @@ function stubApi() {
   const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
     const path = input.split("?")[0];
     if (path === "/v1/status") return jsonResponse(STATUS);
+    if (path === "/v1/daemons/credentials") return jsonResponse({ items: [] });
     if (path === "/v1/daemons") return jsonResponse(DAEMONS);
     if (path === "/v1/usage/events") return jsonResponse(USAGE);
     if (path === "/v1/config" && init?.method === "PUT") {

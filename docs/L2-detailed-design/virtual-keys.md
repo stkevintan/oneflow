@@ -21,11 +21,12 @@ See [deployment and usage](../virtual-keys.md) for setup and curl examples.
 
 ## Credentials and request flow
 
-Three credentials have separate purposes:
+Four credentials have separate purposes:
 
 | Credential | Used by | Accepted by |
 | --- | --- | --- |
 | Administrator credential | Management client | Control-plane management API only |
+| Provisioned daemon token | Daemon control client | Control-plane `/control`, bound to its daemon ID |
 | Virtual key | External inference app | Daemon `/v1/*` only |
 | Provider credential | Daemon | Upstream provider only |
 

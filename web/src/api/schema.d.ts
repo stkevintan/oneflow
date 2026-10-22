@@ -75,7 +75,87 @@ export interface paths {
         /** List connected daemons */
         get: operations["listDaemons"];
         put?: never;
+        /**
+         * Provision a daemon credential
+         * @description Requires PostgreSQL-backed mode and administrator authentication.
+         *     The caller chooses a unique daemon ID. Returns a random token once;
+         *     only its SHA-256 hash is stored. Duplicate IDs return 409, including
+         *     revoked IDs. Rotate a credential if its creation response is lost.
+         *     All credential responses use Cache-Control no-store.
+         */
+        post: operations["createDaemon"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/daemons/credentials": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List provisioned daemons, including offline and revoked credentials
+         * @description Administrator-only in PostgreSQL-backed mode; otherwise 503.
+         *     Metadata only: no token or token hash is returned. Connection presence
+         *     remains available separately at GET /v1/daemons and is process-local.
+         *     Responses use Cache-Control no-store.
+         */
+        get: operations["listDaemonCredentials"];
+        put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/daemons/{daemon_id}/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Replace a daemon token and reactivate a revoked daemon
+         * @description Returns the replacement token once, with Cache-Control no-store.
+         *     The previous token cannot reconnect. Existing sessions are rechecked
+         *     before processing messages or sending updates, and at least every
+         *     5 seconds. In-flight messages may finish. Disconnected daemons can
+         *     serve cached inference permissions until their existing policy lease
+         *     expires (at most 300 seconds plus clock skew); rotation does not
+         *     instantly disable inference on the daemon host.
+         */
+        post: operations["rotateDaemonCredential"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/daemons/{daemon_id}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Revoke a daemon credential
+         * @description Idempotent. Metadata is retained. Blocks new control connections;
+         *     existing sessions are fenced as described for rotation. Cached
+         *     inference permissions remain bounded by the existing policy lease.
+         *     Responses use Cache-Control no-store.
+         */
+        post: operations["revokeDaemonCredential"];
         delete?: never;
         options?: never;
         head?: never;
@@ -262,6 +342,26 @@ export interface components {
         DeleteKeysResponse: {
             /** @description Hashes only; plaintext inputs are never echoed. */
             deleted_keys: string[];
+        };
+        CreateDaemonRequest: {
+            daemon_id: string;
+        };
+        DaemonCredential: {
+            daemon_id: string;
+            /** Format: int64 */
+            created_at: number;
+            /** Format: int64 */
+            rotated_at: number | null;
+            /** Format: int64 */
+            revoked_at: number | null;
+        };
+        IssuedDaemonCredential: {
+            credential: components["schemas"]["DaemonCredential"];
+            /** @description One-time plaintext control-channel token. Never log it. */
+            token: string;
+        };
+        DaemonCredentialList: {
+            items: components["schemas"]["DaemonCredential"][];
         };
         HealthResponse: {
             /** @description Always `ok` when the service responds. */
@@ -551,6 +651,114 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+        };
+    };
+    createDaemon: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateDaemonRequest"];
+            };
+        };
+        responses: {
+            /** @description Provisioned; save the token securely */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IssuedDaemonCredential"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            /** @description Daemon ID already exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listDaemonCredentials: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Provisioned daemon credential metadata, sorted by ID */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DaemonCredentialList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    rotateDaemonCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                daemon_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Replacement credential; deploy the token to the daemon */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IssuedDaemonCredential"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    revokeDaemonCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                daemon_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Revoked credential metadata */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DaemonCredential"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["Unavailable"];
         };
     };
     getDaemon: {

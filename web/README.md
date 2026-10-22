@@ -5,6 +5,20 @@ plane is a pure API service (`/v1/*` and `/control`) and serves no UI, so the
 dashboard is deployed on its own, like any other client (CLI, TUI, desktop); see
 [ADR 0001](../docs/adr/0001-api-only-stateless-control-plane.md).
 
+## Daemon provisioning
+
+With PostgreSQL-backed mode enabled, apply the administrator token and use
+**Daemon credentials** to create an ID. Save the one-time token on the daemon
+host as `ONEFLOW_DAEMON_TOKEN` and configure the same `daemon_id` with
+`auth_mode = "virtual_keys"`. Tokens stay only in page memory; dismiss after
+deploying. The list includes offline and revoked daemons. Rotation/revocation
+require confirmation; rotation also reactivates a revoked credential. Restart
+the daemon after deploying a replacement token.
+
+Credential metadata is separate from the live connection table. Legacy mode
+shows an explicit storage-unavailable message rather than permitting unauthenticated
+provisioning. See [deployment](../docs/virtual-keys.md#3-start-a-virtual-key-daemon).
+
 ## Contract-first workflow
 
 [`contract/openapi.yaml`](../contract/openapi.yaml) is the source of truth for the
@@ -53,6 +67,7 @@ build. Regenerate all bindings with [`scripts/generate-types.sh`](../scripts/gen
 ## Commands
 
 ```sh
+# From the repository root, first: cp config.example.toml config.toml
 npm install
 npm run generate:api   # regenerate types from contract/openapi.yaml
 npm run dev            # address and API proxy are read from ../config.toml
@@ -62,8 +77,10 @@ npm test               # vitest + jsdom component tests
 npm run typecheck
 ```
 
-The shared `../config.toml` configures the control-plane address and the address
-of the dev and preview servers. Both servers proxy `/v1` to the control plane, so
+The user-created, Git-ignored `../config.toml` (copied from
+[`config.example.toml`](../config.example.toml)) configures the control-plane
+address and the address of the dev and preview servers. Both servers proxy
+`/v1` and `/key` to the control plane, so
 the browser sees a single origin and no CORS setup is needed. Set `LLMCP_CONFIG`
 to use a different TOML file. The daemon is a standalone executable with its own
 TOML file and explicit `--cp` WebSocket endpoint; see

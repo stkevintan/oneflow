@@ -42,13 +42,18 @@ Client app ──OpenAI-compatible HTTP──> Daemon ──HTTP(S)──> Model
 
 Requirements: Rust toolchain and Node.js/npm.
 
-1. Start the control plane from the repository root:
+1. Create your local configuration and start the control plane from the repository root:
 
    ```sh
+   cp config.example.toml config.toml
    cargo run -p control-plane
    ```
 
-   By default it listens on `0.0.0.0:4000`, using [`config.toml`](config.toml).
+   By default it listens on `0.0.0.0:4000`. Your local `config.toml` is
+   Git-ignored; only [`config.example.toml`](config.example.toml) is tracked.
+   Set `LLMCP_CONFIG` to select another file. Configure `database_url`,
+   and `admin_token` under `[control_plane]` to enable
+   PostgreSQL-backed virtual keys; see [deployment](docs/virtual-keys.md).
 
 2. In another terminal, install dashboard dependencies and start the web app:
 
@@ -59,9 +64,12 @@ Requirements: Rust toolchain and Node.js/npm.
    ```
 
    Open the address printed by Vite (defaults to `http://127.0.0.1:5173`).
-   The dev server proxies `/v1` requests to the control plane.
+   The dev server proxies `/v1` and `/key` requests to the control plane.
 
-3. Configure a model in the dashboard, then start the daemon from the
+3. Configure a model in the dashboard. In virtual-key mode, use **Daemon
+   credentials** to create a daemon ID and save its one-time token. On the daemon
+   host, set `ONEFLOW_DAEMON_TOKEN`, and configure the matching `daemon_id` and
+   `auth_mode = "virtual_keys"`. Then start the daemon from the
    repository root with its standalone example config:
 
    ```sh

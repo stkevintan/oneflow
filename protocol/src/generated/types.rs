@@ -108,6 +108,12 @@ pub struct KeyInfoResponse {
     pub key: String,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct IssuedDaemonCredential {
+    pub credential: DaemonCredential,
+    ///One-time plaintext control-channel token. Never log it.
+    pub token: String,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GenerateKeyResponse {
     ///True when permanently deleted/revoked.
     pub blocked: bool,
@@ -172,6 +178,22 @@ pub struct Daemon {
     ///Constraint: minimum=0
     pub total_requests: i64,
     pub version: Option<String>,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DaemonCredentialList {
+    pub items: Vec<DaemonCredential>,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DaemonCredential {
+    pub created_at: i64,
+    pub daemon_id: String,
+    pub revoked_at: Option<i64>,
+    pub rotated_at: Option<i64>,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CreateDaemonRequest {
+    ///Constraint: minLength=1, maxLength=128, pattern=`^[A-Za-z0-9._-]+$`
+    pub daemon_id: String,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DeleteKeysRequest {

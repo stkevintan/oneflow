@@ -17,6 +17,7 @@ pnpm-debug.log*
 !.env.example
 !.env.*.example
 *.local.toml
+/config.toml
 
 # Editor and operating-system files
 .idea/

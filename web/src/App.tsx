@@ -2,12 +2,14 @@ import { RECENT_USAGE_LIMIT, useDashboard } from "./api/useDashboard";
 import { Card } from "./components/Card";
 import { ConfigEditor } from "./components/ConfigEditor";
 import { DaemonTable } from "./components/DaemonTable";
+import { DaemonCredentials } from "./components/DaemonCredentials";
 import { TelemetryTable } from "./components/TelemetryTable";
 import { Topbar } from "./components/Topbar";
 
 export default function App() {
   const { snapshot, error, connection, refresh } = useDashboard();
   const [token, setToken] = useState("");
+  const [authRevision, setAuthRevision] = useState(0);
 
   return (
     <div className="min-h-screen bg-slate-950">
@@ -20,6 +22,7 @@ export default function App() {
             event.preventDefault();
             setAdminToken(token);
             setToken("");
+            setAuthRevision((revision) => revision + 1);
             void refresh();
           }}
         >
@@ -45,6 +48,11 @@ export default function App() {
             Cannot reach the control plane: {error}
           </p>
         ) : null}
+
+        <DaemonCredentials key={authRevision}
+          credentials={snapshot?.credentials ?? []}
+          unavailable={snapshot?.credentialError ?? null}
+          ready={connection === "live"} onChanged={refresh} />
 
         <Card
           title="Connected daemons"

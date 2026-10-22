@@ -13,6 +13,7 @@ serves no UI; dashboards, CLIs, and other clients are deployed separately (see
 | `control-plane/src/store.rs` | `MemoryStore`: desired config, daemon sessions, usage history |
 | `control-plane/src/virtual_keys.rs` | Opt-in PostgreSQL model/key storage, policy snapshots, and management/control authentication |
 | `control-plane/src/key_api.rs` | LiteLLM-style key-management request mapping and response shapes |
+| `control-plane/src/daemon_credentials.rs` | Durable daemon credential provisioning, rotation, revocation, and hash validation |
 
 With virtual-key mode enabled, desired models and keys are stored in PostgreSQL,
 not `MemoryStore`. Management routes require the administrator token (except
@@ -42,6 +43,10 @@ Presence and recent usage remain process-local. See
 | GET | `/v1/config` | `get_config` | Current desired `ModelConfigSet`. |
 | PUT | `/v1/config` | `put_config` | Validates, stores, and broadcasts the full set; returns it. |
 | GET | `/v1/daemons` | `list_daemons` | `DaemonList { items }`, ordered by `connection_id`. |
+| POST | `/v1/daemons` | Daemon credentials | Provision a unique daemon ID; 201 with one-time token. |
+| GET | `/v1/daemons/credentials` | Daemon credentials | Durable metadata including offline/revoked daemons; no token/hash. |
+| POST | `/v1/daemons/{daemon_id}/rotate` | Daemon credentials | Replace token, reactivate if revoked; one-time secret. |
+| POST | `/v1/daemons/{daemon_id}/revoke` | Daemon credentials | Idempotent revocation, retain metadata. |
 | GET | `/v1/daemons/{connection_id}` | `get_daemon` | One `Daemon`, or JSON 404. |
 | GET | `/v1/usage/events` | `list_usage_events` | `UsageEventPage`, newest first (see below). |
 | POST | `/key/generate` | Virtual-key management | LiteLLM-style creation; one-time `key`, `models`, `key_alias`, optional `duration`. |
@@ -89,8 +94,19 @@ web dev and preview servers proxy `/v1`, so the browser sees one origin.
 
 ### Authentication
 
-The contract declares a global `bearerAuth` scheme (with `/v1/health` exempt)
-and documents `401` responses, but the server does **not** enforce it yet.
+In PostgreSQL-backed mode, management requires the administrator bearer token,
+except `/v1/health`. `/control` requires a provisioned daemon token and matching
+`x-oneflow-daemon-id`. New daemon-management operations return 503 in legacy mode;
+existing presence/config/usage routes retain legacy behavior.
+
+Daemon credentials use CSPRNG 256-bit secrets, returned once as `ofd_<hex>`.
+Only their SHA-256 hashes are persisted. Rotation replaces the hash, revocation
+marks the row, and both fence existing control sessions. Sessions revalidate
+against the database before processing messages/sending updates and every
+5 seconds, closing on invalid credentials or database failure. In-flight
+messages may finish. Offline inference permissions remain bounded by the
+existing policy lease. All daemon-management responses have `Cache-Control:
+no-store`. See [deployment and migration](../virtual-keys.md#manage-daemon-credentials).
 Clients should already send `Authorization: Bearer …` where they can.
 
 ## State (`store.rs`)

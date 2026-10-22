@@ -329,7 +329,7 @@ mod tests {
             http::{header, Request},
         };
         use sha2::{Digest, Sha256};
-        use std::{collections::HashMap, sync::Arc};
+        use std::sync::Arc;
         use tower::ServiceExt;
         let Ok(url) = std::env::var("ONEFLOW_TEST_DATABASE_URL") else {
             return;
@@ -350,7 +350,6 @@ mod tests {
             virtual_key_mode: Some(Arc::new(crate::VirtualKeyMode {
                 store: store.clone(),
                 admin_token: Arc::new("test-admin-token".into()),
-                daemon_tokens: Arc::new(HashMap::new()),
             })),
         };
         let app = crate::api::create_app(state, vec![]);

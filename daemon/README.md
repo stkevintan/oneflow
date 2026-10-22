@@ -53,7 +53,10 @@ label.
 
 Set `auth_mode = "virtual_keys"` in the daemon TOML (or pass
 `--auth-mode virtual_keys`) and set `ONEFLOW_DAEMON_TOKEN` to the daemon's
-control-channel credential. Do not set `DAEMON_API_KEYS` in this mode.
+control-channel credential. Provision it through **Daemon credentials** in the
+dashboard or administrator-authenticated `POST /v1/daemons`; configure the same
+`daemon_id` on the daemon. The token is returned once. Rotation replaces it;
+deploy the replacement and restart the daemon. Do not set `DAEMON_API_KEYS` in this mode.
 Remote control connections require `wss://`; local development may use
 loopback `ws://`.
 

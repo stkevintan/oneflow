@@ -6,19 +6,38 @@ implemented.
 
 ## 1. Start an authenticated control plane
 
-Provision PostgreSQL and a dedicated database. Set these environment variables
-on the control-plane host (values below are placeholders, not usable secrets):
+Provision PostgreSQL and a dedicated database. Create your local configuration:
+
+```sh
+cp config.example.toml config.toml
+chmod 600 config.toml
+```
+
+The local `config.toml` is Git-ignored; only `config.example.toml` is committed.
+Under `[control_plane]`, set (values below are placeholders):
+
+```toml
+database_url = "postgres://USER:PASSWORD@HOST:5432/DATABASE?sslmode=require"
+admin_token = "REPLACE_WITH_RANDOM_ADMIN_TOKEN_AT_LEAST_32_BYTES"
+```
+
+Use a PostgreSQL URL, percent-encoding special characters in usernames and
+passwords. Select SSL settings appropriate for your deployment; `sslmode=disable`
+is only suitable for a trusted local network. Then run `cargo run -p control-plane`.
+`LLMCP_CONFIG` can select a different configuration file.
+
+Alternatively, supply environment variables. Each overrides its matching TOML
+setting, so secrets can stay in your deployment's secret manager:
 
 ```sh
 export ONEFLOW_DATABASE_URL='postgresql://USER:PASSWORD@HOST/DATABASE'
 export ONEFLOW_ADMIN_TOKEN='REPLACE_WITH_RANDOM_ADMIN_TOKEN'
-export ONEFLOW_DAEMON_TOKENS='{"daemon-poc-001":"REPLACE_WITH_RANDOM_DAEMON_TOKEN"}'
 cargo run -p control-plane
 ```
 
-Use independent, cryptographically random credentials for management and each
-daemon. The daemon ID in the map is bound to its control-channel credential.
-All three control-plane settings must be supplied together; a partial setup
+Use a cryptographically random administrator credential. Daemon credentials
+are generated through the API/dashboard, not configuration.
+Both control-plane settings must resolve from TOML and/or environment; a partial setup
 is rejected rather than silently reverting to legacy mode.
 The database schema is initialized at startup. Model configuration and virtual
 keys are durable in this mode; daemon presence and recent usage remain
@@ -26,7 +45,7 @@ process-local and bounded.
 
 Expose management and `/control` only through an HTTPS/WSS reverse proxy for
 remote access, and prevent direct access to its plaintext backend. Never place
-credentials in URLs, logs, committed configuration, or a frontend build-time
+bearer credentials in URLs or logs, or any secrets in committed configuration or a frontend build-time
 environment variable. Local development may use loopback HTTP/WS.
 
 The dashboard has an **Administrator token** input. It retains the applied
@@ -51,6 +70,23 @@ changes the destination for keys granted that alias.
 
 ## 3. Start a virtual-key daemon
 
+In the dashboard, apply the administrator token, then use **Daemon credentials**
+to create a unique daemon ID. Save the generated token immediately; it is shown
+once, kept only in page memory, and cannot be recovered. Dismiss the token after
+deploying it. The same operation is available through the API:
+
+```sh
+curl --fail-with-body http://127.0.0.1:4000/v1/daemons \
+  -X POST -H "Authorization: Bearer $ONEFLOW_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"daemon_id":"daemon-poc-001"}'
+```
+
+The 201 response contains `{ "credential": { "daemon_id": "...", ... }, "token": "ofd_..." }`.
+Only the SHA-256 token hash is persisted in PostgreSQL. A duplicate ID returns
+409, even for a revoked daemon. If a creation response is lost, rotate that ID
+instead of trying to recover its token.
+
 Add this to the daemon's standalone TOML (not the repository-root config):
 
 ```toml
@@ -63,7 +99,7 @@ auth_mode = "virtual_keys"
 On the daemon host, set the matching control credential and provider credential:
 
 ```sh
-export ONEFLOW_DAEMON_TOKEN='REPLACE_WITH_RANDOM_DAEMON_TOKEN'
+export ONEFLOW_DAEMON_TOKEN='REPLACE_WITH_TOKEN_FROM_PROVISIONING'
 export MY_PROVIDER_API_KEY='REPLACE_WITH_PROVIDER_KEY'
 oneflowd -c /path/to/daemon.toml
 ```
@@ -71,6 +107,37 @@ oneflowd -c /path/to/daemon.toml
 Remote control connections must use `wss://`. Virtual-key mode refuses static
 `DAEMON_API_KEYS` and never falls back to anonymous access. The CLI override
 is `--auth-mode virtual_keys`. The default remains `legacy`.
+
+### Manage daemon credentials
+
+The dashboard lists provisioned credentials even when the daemon is offline,
+separately from the connected-daemon table. **Rotate** replaces the token;
+**Revoke** disables the credential. Both require confirmation. Rotating a
+revoked daemon reactivates it. Deploy each replacement token and restart the
+daemon; tokens are not automatically installed on daemon hosts.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /v1/daemons/credentials` | List metadata only, including revoked credentials |
+| `POST /v1/daemons/{daemon_id}/rotate` | Issue a replacement token once |
+| `POST /v1/daemons/{daemon_id}/revoke` | Revoke idempotently and retain metadata |
+
+All operations require the administrator token and PostgreSQL-backed mode.
+Credential responses use `Cache-Control: no-store`. They never return stored
+hashes, and only creation/rotation return plaintext tokens.
+
+New connections validate credentials against PostgreSQL. Existing connections
+revalidate before processing messages/sending updates and every 5 seconds;
+revocation/rotation fences them across control-plane instances. In-flight
+messages may finish. Database validation failures close the control channel.
+Disconnected daemons can still serve their existing cached inference permissions
+until the policy lease expires (at most 300 seconds plus clock skew). Revoke
+client virtual keys separately if their access should also be removed.
+
+**Migration:** static `control_plane.daemon_tokens` and `ONEFLOW_DAEMON_TOKENS`
+are no longer supported and fail startup rather than silently being ignored.
+Remove them, provision the old daemon IDs through this API, and deploy the new
+tokens to daemon hosts.
 
 ## 4. Issue a key for the app
 
