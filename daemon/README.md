@@ -60,8 +60,9 @@ dashboard or administrator-authenticated `POST /v1/daemons`; configure the same
 `daemon_id` on the daemon. The token is returned once. Rotation replaces it;
 download/deploy the replacement configuration and restart the daemon. There is no authentication mode
 switch and no static client-key or anonymous-access path.
-Remote control connections require `wss://`; local development may use
-loopback `ws://`.
+Control connections support both `ws://` and `wss://` for local and remote
+endpoints. TLS is optional but recommended on untrusted networks; plaintext
+connections expose credentials and policy data to network observers.
 
 The daemon rejects protected requests until it receives a valid policy snapshot.
 Policies grant exact model aliases and expire after at most five minutes

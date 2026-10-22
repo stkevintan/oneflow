@@ -43,10 +43,12 @@ The database schema is initialized at startup. Model configuration and virtual
 keys are durable in this mode; daemon presence and recent usage remain
 process-local and bounded.
 
-Expose management and `/control` only through an HTTPS/WSS reverse proxy for
-remote access, and prevent direct access to its plaintext backend. Never place
+TLS is optional for management and `/control`, including remote access. For
+untrusted networks, use an HTTPS/WSS reverse proxy and prevent direct access
+to its plaintext backend. Unencrypted connections expose credentials and policy
+data to network observers. Never place
 bearer credentials in URLs or logs, or any secrets in committed configuration or a frontend build-time
-environment variable. Local development may use loopback HTTP/WS.
+environment variable. Local and remote deployments may use HTTP/WS.
 
 The dashboard has an **Administrator token** input. It retains the applied
 token in memory only; reload clears it. Key lifecycle operations are currently
@@ -112,7 +114,7 @@ export MY_PROVIDER_API_KEY='REPLACE_WITH_PROVIDER_KEY'
 oneflowd -c config.toml
 ```
 
-Remote control connections must use `wss://`. Every inference request requires
+Control connections support both `ws://` and `wss://`. Every inference request requires
 a virtual API key. Static client keys and anonymous access are not supported.
 `ONEFLOW_DAEMON_TOKEN`, if set, overrides the file's `control_token`; unset it
 to use a downloaded replacement. The file contains a bearer secret: do not

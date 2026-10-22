@@ -121,14 +121,10 @@ fn validate_control_plane_url(value: &str) -> Result<()> {
     let url = url::Url::parse(value).context("invalid control_plane.websocket_url")?;
     anyhow::ensure!(
         url.host_str().is_some()
-            && (url.scheme() == "wss"
-                || (url.scheme() == "ws" && url.host_str().is_some_and(|host| {
-                    host == "localhost" || host.trim_matches(['[', ']'])
-                        .parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
-                })))
+            && matches!(url.scheme(), "ws" | "wss")
             && url.username().is_empty() && url.password().is_none()
             && url.query().is_none() && url.fragment().is_none(),
-        "control_plane.websocket_url must be a credential-free WSS URL (WS allowed only on loopback)"
+        "control_plane.websocket_url must be a WS or WSS URL with a host and without credentials, query, or fragment"
     );
     Ok(())
 }
@@ -256,17 +252,18 @@ mod configuration_tests {
     use super::*;
 
     #[test]
-    fn provisioning_url_is_secure_and_credential_free() {
+    fn provisioning_url_accepts_ws_and_wss_without_credentials() {
         for value in [
             "wss://control.example/control",
             "ws://127.0.0.1:4000/control",
             "ws://[::1]/control",
+            "ws://remote.example/control",
+            "ws://192.168.2.148:4000/control",
         ] {
             assert!(validate_control_plane_url(value).is_ok(), "{value}");
         }
         for value in [
             "",
-            "ws://remote.example/control",
             "https://control.example/control",
             "wss://user:password@control.example/control",
             "wss://control.example/control?token=secret",

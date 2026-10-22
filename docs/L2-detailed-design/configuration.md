@@ -47,8 +47,8 @@ ConfigProvider::load()           // $LLMCP_CONFIG or ./config.toml
   startup.
 - `websocket_url` is the address the dashboard dev and preview proxies use to
   find the control plane and the `cp` URL embedded in newly provisioned daemon
-  downloads. Configure a daemon-reachable public WSS URL for remote deployment;
-  loopback WS is allowed for local development. Credentials, query strings,
+  downloads. Configure a daemon-reachable WS or WSS URL for local or remote
+  deployment. TLS is optional but recommended on untrusted networks. Credentials, query strings,
   and fragments are forbidden.
 - `cors_allowed_origins` (optional, default `[]`) lists exact browser origins,
   such as `"https://dashboard.example"`, allowed to call `/v1` cross-origin.
@@ -136,5 +136,5 @@ default**. The control-plane URL is required and can be supplied by `--cp`,
 - No hot reload: both services read their files only at startup.
 - Model configuration and credentials are durable; presence and recent usage
   remain process-local.
-- Native TLS termination is not implemented; remote deployments
-  require an HTTPS/WSS reverse proxy.
+- Native TLS termination is not implemented. TLS is optional; use an HTTPS/WSS
+  reverse proxy when encrypted transport is needed.

@@ -171,17 +171,8 @@ impl DaemonConfig {
         );
         let url = url::Url::parse(&cp).context("invalid control-plane URL")?;
         anyhow::ensure!(
-            url.scheme() == "wss"
-                || (url.scheme() == "ws"
-                    && url.host_str().is_some_and(|host| {
-                        host == "localhost"
-                            || host
-                                .trim_start_matches('[')
-                                .trim_end_matches(']')
-                                .parse::<std::net::IpAddr>()
-                                .is_ok_and(|ip| ip.is_loopback())
-                    })),
-            "wss is required for non-loopback control connections"
+            url.host_str().is_some() && matches!(url.scheme(), "ws" | "wss"),
+            "control-plane URL must use ws or wss and include a host"
         );
         anyhow::ensure!(
             url.username().is_empty()
@@ -258,7 +249,7 @@ mod config_tests {
     }
 
     #[test]
-    fn credentials_and_secure_control_url_are_required() {
+    fn credentials_and_valid_control_url_are_required() {
         let args = Args::try_parse_from(["oneflowd", "--cp", "ws://localhost/control"]).unwrap();
         for token in [
             "",
@@ -273,10 +264,10 @@ mod config_tests {
             .is_err());
         }
         for url in [
-            "ws://remote.example/control",
             "https://remote.example/control",
             "wss://user:password@remote.example/control",
             "wss://remote.example/control?token=secret",
+            "wss://remote.example/control#fragment",
         ] {
             let args = Args::try_parse_from(["oneflowd", "--cp", url]).unwrap();
             assert!(resolve(&args, DaemonConfig::default()).is_err(), "{url}");
@@ -285,6 +276,8 @@ mod config_tests {
             "wss://remote.example/control",
             "ws://127.0.0.1:4000/control",
             "ws://[::1]:4000/control",
+            "ws://remote.example/control",
+            "ws://192.168.2.148:4000/control",
         ] {
             let args = Args::try_parse_from(["oneflowd", "--cp", url]).unwrap();
             assert!(resolve(&args, DaemonConfig::default()).is_ok(), "{url}");

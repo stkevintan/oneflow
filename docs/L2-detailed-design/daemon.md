@@ -22,7 +22,7 @@ daemon [--config <path>] [--cp <ws-url>] [other overrides]
    The control-plane URL is required and can come from `--cp`,
    `CONTROL_PLANE_URL`, or the TOML `cp` setting.
 4. Require TOML `control_token` or its `ONEFLOW_DAEMON_TOKEN` override and validate the authenticated control endpoint.
-   Remote control connections require WSS.
+   Local and remote control connections support WS and WSS; TLS is optional.
 5. Create the telemetry `mpsc` channel (capacity 256) and `AppState`.
 6. Bind `listen_addr` **before** spawning the control channel, then log the
    bound address. The default `127.0.0.1:9000` keeps the API local-only at a
