@@ -56,7 +56,7 @@ ConfigProvider::load()           // $LLMCP_CONFIG or ./config.toml
 | Flag | Required | Meaning |
 | --- | --- | --- |
 | `--cp <URL>` | no | Control-plane WebSocket URL; overrides environment and TOML |
-| `--config <PATH>` | no | Select a daemon TOML file instead of `./config.toml` |
+| `-c, --config <PATH>` | no | Select a daemon TOML file instead of `./config.toml` |
 | `--listen-addr <SOCKET>` | no | HTTP listener address |
 | `--daemon-id <ID>` | no | Identity reported during registration |
 | `--connect-timeout-ms <MS>` | no | Upstream connection timeout |
@@ -75,7 +75,7 @@ with `--config`. Settings use top-level keys; see
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `cp` | — | Control-plane WebSocket URL (required unless supplied by CLI or environment) |
-| `listen_addr` | `127.0.0.1:0` | Local-only HTTP listener. Port 0 means the OS selects a port, which is logged at startup |
+| `listen_addr` | `127.0.0.1:9000` | Local-only HTTP listener; inference routes use fixed paths including `/v1/chat/completions` |
 | `daemon_id` | `daemon-poc-001` | Identity reported in registration and telemetry |
 | `connect_timeout_ms` | 5000 | Upstream TCP/TLS connect timeout |
 | `read_timeout_ms` | 60000 | Upstream per-read timeout (bounds streaming stalls) |

@@ -133,7 +133,7 @@ dropped and counted in `/healthz`.
 | --- | --- | --- |
 | Control plane | Fixed: `control_plane.bind_addr` (default `0.0.0.0:4000`) | `config.toml`; `LLMCP_CONFIG` selects another file |
 | Web dashboard (`npm run dev` / `npm run preview`) | Fixed: `web.addr` (default `127.0.0.1:5173`) | `config.toml`; `VITE_CONTROL_PLANE_URL` for a bundle hosted on another origin |
-| Daemon | Its own local TOML, CLI options, or environment; default listener `127.0.0.1:0` | `daemon [--cp <ws-url>] [--config <path>]` |
+| Daemon | Its own local TOML, CLI options, or environment; default listener `127.0.0.1:9000` | `oneflowd [--cp <ws-url>] [--config <path>]` |
 
 Today three kinds of process run: one control plane, one daemon per cluster,
 and any number of clients (the web dashboard, served locally or from a static

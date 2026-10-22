@@ -24,8 +24,9 @@ daemon [--config <path>] [--cp <ws-url>] [other overrides]
 4. Warn if `DAEMON_API_KEYS` is empty, because `/v1/*` is then unauthenticated.
 5. Create the telemetry `mpsc` channel (capacity 256) and `AppState`.
 6. Bind `listen_addr` **before** spawning the control channel, then log the
-   bound address. With the default `127.0.0.1:0`, the API is local-only and
-   this log line is the only place the OS-selected port appears.
+   bound address. The default `127.0.0.1:9000` keeps the API local-only at a
+   stable address; its inference routes have fixed paths such as
+   `/v1/chat/completions`.
 7. Spawn `run_control_channel` and serve the HTTP router.
 
 ## State

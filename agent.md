@@ -157,8 +157,8 @@ control-plane/web config. It reads `./config.toml` when present, or a file
 selected by `--config`. CLI options override environment variables, which
 override TOML settings and built-in defaults. The control-plane URL is required
 and can be set with `--cp`, `CONTROL_PLANE_URL`, or the TOML `cp` setting. Its
-API listener defaults to `127.0.0.1:0`, so it is local-only; the OS selects an
-available port and the daemon logs the chosen address.
+API listener defaults to `127.0.0.1:9000`, so it is local-only at a stable
+address. The inference routes use fixed paths such as `/v1/chat/completions`.
 `DAEMON_API_KEYS` optionally supplies comma-separated client keys.
 
 | Variable | Purpose |

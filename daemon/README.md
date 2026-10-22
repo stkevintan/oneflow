@@ -19,8 +19,8 @@ The daemon automatically reads `./config.toml` when present. The daemon's
 configuration is independent of the control-plane/web configuration. Start
 from [`config.example.toml`](./config.example.toml), which uses top-level
 daemon settings, and place it on the remote machine as `config.toml`. Use
-`--config PATH` to select a different file, or pass settings directly as CLI
-options. CLI options take precedence over environment variables, which take
+`--config PATH` or `-c PATH` to select a different file, or pass settings
+directly as CLI options. CLI options take precedence over environment variables, which take
 precedence over TOML values and then built-in defaults. The control-plane URL
 must be provided with `--cp`, `CONTROL_PLANE_URL`, or the `cp` TOML setting;
 the daemon always initiates this WebSocket connection.
@@ -29,10 +29,12 @@ The repository-root `config.toml` is for the control plane and web server, not
 the daemon. When running from the repository root, specify the daemon file
 explicitly, for example `--config daemon/config.example.toml`.
 
-The API listens on `127.0.0.1:0` by default, so it is available only to local
-clients and the OS chooses an available port. The selected address is logged
-at startup. See [`config.example.toml`](./config.example.toml) for the
-available daemon settings and their defaults.
+The API listens on `127.0.0.1:9000` by default, so it is available only to
+local clients at a stable address. The fixed API paths include
+`/v1/chat/completions`, `/v1/models`, and `/healthz`. Override the listener
+with `--listen-addr`, `DAEMON_LISTEN_ADDR`, or `listen_addr` in the config.
+See [`config.example.toml`](./config.example.toml) for the available daemon
+settings and their defaults.
 
 `DAEMON_API_KEYS` optionally sets comma-separated client API keys.
 `DAEMON_ID`, `DAEMON_LISTEN_ADDR`, `UPSTREAM_CONNECT_TIMEOUT_MS`,

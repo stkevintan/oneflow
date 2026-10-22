@@ -67,10 +67,10 @@ Requirements: Rust toolchain and Node.js/npm.
    `config.toml` in its working directory, or from `--config PATH`. CLI options
    override environment variables, which override TOML values. For example,
    `cargo run -p oneflowd -- --cp ws://127.0.0.1:4000/control --listen-addr 127.0.0.1:9000`.
-   The API listens on `127.0.0.1` at an OS-selected port by default and logs
-   the selected address. Configure the model's provider URL and credentials in
-   the model configuration; the daemon supports environment-backed provider
-   keys via `api_key_env`.
+   The API listens on `127.0.0.1:9000` by default. Its chat completions
+   endpoint is `http://127.0.0.1:9000/v1/chat/completions`; configure the
+   model's provider URL and credentials in the model configuration. The daemon
+   supports environment-backed provider keys via `api_key_env`.
 
 For deployment guidance and configuration options, see the
 [daemon guide](daemon/README.md) and

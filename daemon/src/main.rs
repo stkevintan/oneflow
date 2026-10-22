@@ -29,6 +29,7 @@ const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_READ_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 120_000;
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:9000";
 
 #[derive(Debug, Parser)]
 #[command(about = "Oneflow standalone inference daemon")]
@@ -37,7 +38,7 @@ struct Args {
     #[arg(long, value_name = "URL")]
     cp: Option<String>,
     /// Config file to read (defaults to ./config.toml when present).
-    #[arg(long, value_name = "PATH")]
+    #[arg(short, long, value_name = "PATH")]
     config: Option<PathBuf>,
     /// HTTP listener address.
     #[arg(long, value_name = "SOCKET")]
@@ -109,7 +110,7 @@ impl DaemonConfig {
             .clone()
             .or_else(|| env::var("DAEMON_LISTEN_ADDR").ok())
             .or(file.listen_addr)
-            .unwrap_or_else(|| "127.0.0.1:0".to_string());
+            .unwrap_or_else(|| DEFAULT_LISTEN_ADDR.to_string());
         let daemon_id = args
             .daemon_id
             .clone()
@@ -164,26 +165,30 @@ mod config_tests {
     use super::*;
 
     #[test]
-    fn example_config_has_an_ephemeral_listener() {
+    fn example_config_has_a_fixed_local_listener() {
         let config = DaemonConfig::load_from_str(include_str!("../config.example.toml")).unwrap();
         let listen_addr: SocketAddr = config.listen_addr.unwrap().parse().unwrap();
 
         assert!(listen_addr.ip().is_loopback());
-        assert_eq!(listen_addr.port(), 0);
+        assert_eq!(listen_addr.port(), 9000);
     }
 
     #[test]
-    fn defaults_to_a_local_ephemeral_listener() {
-        let listen_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    fn defaults_to_a_fixed_local_listener() {
+        let args =
+            Args::try_parse_from(["oneflowd", "--cp", "ws://localhost:4000/control"]).unwrap();
+        let resolved = DaemonConfig::resolve(&args, DaemonConfig::default()).unwrap();
+        let listen_addr: SocketAddr = resolved.listen_addr.parse().unwrap();
 
         assert!(listen_addr.ip().is_loopback());
-        assert_eq!(listen_addr.port(), 0);
+        assert_eq!(listen_addr.port(), 9000);
     }
 
     #[test]
     fn cli_allows_config_file_or_command_line_values() {
         assert!(Args::try_parse_from(["daemon"]).is_ok());
         assert!(Args::try_parse_from(["daemon", "--cp", "ws://localhost:4000/control"]).is_ok());
+        assert!(Args::try_parse_from(["daemon", "-c", "daemon.toml"]).is_ok());
         assert!(Args::try_parse_from([
             "daemon",
             "--cp",
