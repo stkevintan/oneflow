@@ -13,6 +13,7 @@
 // `generated/` is emitted by `openapi-to-rust`; rustfmt must not rewrite it or
 // the generator's `--check` mode would report the committed output as stale.
 #[rustfmt::skip]
+#[allow(clippy::double_must_use, reason = "Generated nullable-field builders repeat must_use on their return type")]
 pub mod generated;
 
 pub use generated::types::*;
@@ -46,6 +47,7 @@ impl ModelConfigParameters {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 pub enum ControlMessage {
+    VirtualKeyPolicySnapshot(VirtualKeyPolicySnapshot),
     ConfigUpdate {
         models: Vec<ModelConfig>,
         version: String,
@@ -68,9 +70,47 @@ impl From<ModelConfigSet> for ControlMessage {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 pub enum DaemonMessage {
+    VirtualKeyPolicyAck(VirtualKeyPolicyAck),
     Registration(Registration),
     Heartbeat(Heartbeat),
     Telemetry(Telemetry),
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualKeyPolicy {
+    pub key_id: String,
+    pub token_sha256: String,
+    pub allowed_models: Vec<String>,
+    pub expires_at: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualKeyPolicySnapshot {
+    pub protocol_version: u32,
+    pub revision: i64,
+    pub issued_at: i64,
+    pub valid_until: i64,
+    pub keys: Vec<VirtualKeyPolicy>,
+}
+
+impl std::fmt::Debug for VirtualKeyPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VirtualKeyPolicy")
+            .field("key_id", &self.key_id)
+            .field("allowed_models", &self.allowed_models)
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualKeyPolicyAck {
+    pub protocol_version: u32,
+    pub revision: i64,
+    pub valid_until: i64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -93,6 +133,8 @@ pub struct Heartbeat {
 /// provider. The control plane stores these as [`UsageEvent`]s.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Telemetry {
+    #[serde(default)]
+    pub virtual_key_id: Option<String>,
     pub daemon_id: String,
     pub model_name: String,
     pub prompt_tokens: u32,
@@ -113,6 +155,7 @@ impl From<Telemetry> for UsageEvent {
         // either side of the contract becomes a compile error here rather than
         // silently drifting.
         Self {
+            virtual_key_id: telemetry.virtual_key_id,
             daemon_id: telemetry.daemon_id,
             model_name: telemetry.model_name,
             prompt_tokens: i64::from(telemetry.prompt_tokens),
@@ -126,5 +169,58 @@ impl From<Telemetry> for UsageEvent {
             // Receipt time is stamped by the control plane, which overwrites this.
             received_at: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod virtual_key_tests {
+    use super::*;
+
+    #[test]
+    fn policy_wire_format_and_redacted_debug() {
+        let message = ControlMessage::VirtualKeyPolicySnapshot(VirtualKeyPolicySnapshot {
+            protocol_version: 1,
+            revision: 2,
+            issued_at: 1000,
+            valid_until: 1300,
+            keys: vec![VirtualKeyPolicy {
+                key_id: "a".repeat(32),
+                token_sha256: "b".repeat(64),
+                allowed_models: vec!["alias".into()],
+                expires_at: None,
+            }],
+        });
+        let value = serde_json::to_value(&message).unwrap();
+        assert_eq!(value["type"], "VirtualKeyPolicySnapshot");
+        assert_eq!(value["protocol_version"], 1);
+        assert!(value["keys"][0]["expires_at"].is_null());
+        assert!(!format!("{message:?}").contains(&"b".repeat(64)));
+        let parsed: ControlMessage = serde_json::from_value(value).unwrap();
+        assert!(matches!(
+            parsed,
+            ControlMessage::VirtualKeyPolicySnapshot(_)
+        ));
+        let ack = DaemonMessage::VirtualKeyPolicyAck(VirtualKeyPolicyAck {
+            protocol_version: 1,
+            revision: 2,
+            valid_until: 1300,
+        });
+        let value = serde_json::to_value(ack).unwrap();
+        assert_eq!(value["type"], "VirtualKeyPolicyAck");
+        assert_eq!(value["valid_until"], 1300);
+    }
+
+    #[test]
+    fn legacy_telemetry_defaults_key_id_to_null() {
+        let telemetry: Telemetry = serde_json::from_value(serde_json::json!({
+            "daemon_id": "legacy", "model_name": "alias", "prompt_tokens": 0,
+            "completion_tokens": 0, "success": true, "request_id": "request",
+            "latency_ms": 1, "status_code": 200, "streamed": false,
+            "usage_reported": false
+        }))
+        .unwrap();
+        assert!(telemetry.virtual_key_id.is_none());
+        let event = UsageEvent::from(telemetry);
+        assert!(serde_json::to_value(event).unwrap()["virtual_key_id"].is_null());
     }
 }

@@ -57,6 +57,7 @@ ConfigProvider::load()           // $LLMCP_CONFIG or ./config.toml
 | --- | --- | --- |
 | `--cp <URL>` | no | Control-plane WebSocket URL; overrides environment and TOML |
 | `-c, --config <PATH>` | no | Select a daemon TOML file instead of `./config.toml` |
+| `--auth-mode <MODE>` | no | `legacy` (default) or `virtual_keys` |
 | `--listen-addr <SOCKET>` | no | HTTP listener address |
 | `--daemon-id <ID>` | no | Identity reported during registration |
 | `--connect-timeout-ms <MS>` | no | Upstream connection timeout |
@@ -76,6 +77,7 @@ with `--config`. Settings use top-level keys; see
 | --- | --- | --- |
 | `cp` | — | Control-plane WebSocket URL (required unless supplied by CLI or environment) |
 | `listen_addr` | `127.0.0.1:9000` | Local-only HTTP listener; inference routes use fixed paths including `/v1/chat/completions` |
+| `auth_mode` | `legacy` | Use `virtual_keys` for managed model permissions and bounded policy leases |
 | `daemon_id` | `daemon-poc-001` | Identity reported in registration and telemetry |
 | `connect_timeout_ms` | 5000 | Upstream TCP/TLS connect timeout |
 | `read_timeout_ms` | 60000 | Upstream per-read timeout (bounds streaming stalls) |
@@ -85,6 +87,11 @@ with `--config`. Settings use top-level keys; see
 All keys are optional; unknown keys are rejected.
 
 ### Environment variables
+
+Virtual-key deployment additionally uses `ONEFLOW_DATABASE_URL`,
+`ONEFLOW_ADMIN_TOKEN`, and `ONEFLOW_DAEMON_TOKENS` on the control plane, and
+`ONEFLOW_DAEMON_TOKEN` on each daemon. See
+[deployment and usage](../virtual-keys.md). Keep these secrets out of TOML.
 
 Resolution order: **CLI option → environment variable → TOML → built-in
 default**. The control-plane URL is required and can be supplied by `--cp`,

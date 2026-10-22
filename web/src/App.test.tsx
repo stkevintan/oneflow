@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
+import { setAdminToken } from "./api/client";
 import type { DaemonList, ModelConfigSet, StatusResponse, UsageEventPage } from "./api/client";
 
 const STATUS: StatusResponse = {
@@ -28,6 +29,8 @@ const DAEMONS: DaemonList = {
       failed_requests: 1,
       total_prompt_tokens: 120,
       total_completion_tokens: 240,
+      auth_policy_revision: null,
+      auth_policy_valid_until: null,
     },
   ],
 };
@@ -36,6 +39,7 @@ const USAGE: UsageEventPage = {
   items: [
     {
       request_id: "req-2",
+      virtual_key_id: null,
       daemon_id: "daemon-poc-001",
       model_name: "demo-model",
       prompt_tokens: 0,
@@ -49,6 +53,7 @@ const USAGE: UsageEventPage = {
     },
     {
       request_id: "req-1",
+      virtual_key_id: null,
       daemon_id: "daemon-poc-001",
       model_name: "demo-model",
       prompt_tokens: 12,
@@ -103,6 +108,7 @@ function stubApi() {
 
 describe("dashboard", () => {
   afterEach(() => {
+    setAdminToken("");
     cleanup();
     vi.unstubAllGlobals();
   });
@@ -147,6 +153,20 @@ describe("dashboard", () => {
     const put = fetchMock.mock.calls.find(([, init]) => init?.method === "PUT");
     expect(put?.[0]).toBe("/v1/config");
     expect(JSON.parse(String(put?.[1]?.body)).version).toBe("smoke-v2");
+  });
+
+  it("sends an administrator token without persisting it in the form", async () => {
+    const fetchMock = stubApi();
+    render(<App />);
+    const input = screen.getByLabelText("Administrator token") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "test-admin-token" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply token" }));
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([, init]) =>
+        (init?.headers as Record<string, string> | undefined)?.authorization === "Bearer test-admin-token"
+      )).toBe(true);
+    });
+    expect(input.value).toBe("");
   });
 
   it("shows an offline banner when the control plane is unreachable", async () => {

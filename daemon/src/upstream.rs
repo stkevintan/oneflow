@@ -111,6 +111,7 @@ fn trim_ascii(data: &[u8]) -> &[u8] {
 
 /// Everything needed to describe one upstream call to the control plane.
 pub(crate) struct RequestContext {
+    pub(crate) virtual_key_id: Option<String>,
     pub(crate) daemon_id: String,
     pub(crate) model_name: String,
     pub(crate) request_id: String,
@@ -122,6 +123,7 @@ pub(crate) struct RequestContext {
 impl RequestContext {
     pub(crate) fn telemetry(&self, usage: Option<Usage>, success: bool) -> Telemetry {
         Telemetry {
+            virtual_key_id: self.virtual_key_id.clone(),
             daemon_id: self.daemon_id.clone(),
             model_name: self.model_name.clone(),
             prompt_tokens: usage.map_or(0, |usage| usage.prompt_tokens),

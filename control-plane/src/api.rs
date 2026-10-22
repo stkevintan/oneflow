@@ -3,11 +3,12 @@
 use axum::{
     extract::{
         rejection::{JsonRejection, QueryRejection},
-        Path, Query, State,
+        Path, Query, Request, State,
     },
     http::{header, HeaderValue, Method, StatusCode, Uri},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use protocol::{
@@ -19,7 +20,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::info;
 
 use crate::{
-    control, now_ts,
+    constant_time_token_eq, control, now_ts,
     store::{UsageQuery, USAGE_HISTORY_LIMIT},
     AppState,
 };
@@ -34,10 +35,15 @@ pub fn create_app(state: AppState, cors_allowed_origins: Vec<HeaderValue>) -> Ro
         .route("/v1/daemons", get(list_daemons))
         .route("/v1/daemons/:connection_id", get(get_daemon))
         .route("/v1/usage/events", get(list_usage_events))
+        .route("/key/generate", post(crate::key_api::generate))
+        .route("/key/info", get(crate::key_api::info))
+        .route("/key/list", get(crate::key_api::list))
+        .route("/key/delete", post(crate::key_api::delete))
         .route("/control", get(control::ws_handler))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
-        .with_state(state);
+        .with_state(state.clone())
+        .layer(middleware::from_fn_with_state(state, authorize_management));
 
     if cors_allowed_origins.is_empty() {
         return router;
@@ -45,12 +51,79 @@ pub fn create_app(state: AppState, cors_allowed_origins: Vec<HeaderValue>) -> Ro
     router.layer(
         CorsLayer::new()
             .allow_origin(AllowOrigin::list(cors_allowed_origins))
-            .allow_methods([Method::GET, Method::PUT])
+            .allow_methods([Method::GET, Method::PUT, Method::POST])
             .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]),
     )
 }
 
-fn error(status: StatusCode, message: impl Into<String>) -> Response {
+async fn authorize_management(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    let is_virtual_key_endpoint = path.starts_with("/key/");
+    if let Some(mode) = &state.virtual_key_mode {
+        if path == "/control" {
+            let identity = request
+                .headers()
+                .get("x-oneflow-daemon-id")
+                .and_then(|value| value.to_str().ok());
+            let token = request
+                .headers()
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .filter(|token| {
+                    !token.is_empty() && !token.bytes().any(|byte| byte.is_ascii_whitespace())
+                });
+            let valid = identity
+                .and_then(|identity| mode.daemon_tokens.get(identity).zip(token))
+                .is_some_and(|(expected, supplied)| constant_time_token_eq(expected, supplied));
+            if !valid {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    [(header::WWW_AUTHENTICATE, "Bearer")],
+                    "unauthorized",
+                )
+                    .into_response();
+            }
+        } else if path != "/v1/health" {
+            let valid = request
+                .headers()
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .filter(|token| {
+                    !token.is_empty() && !token.bytes().any(|b| b.is_ascii_whitespace())
+                })
+                .is_some_and(|token| constant_time_token_eq(&mode.admin_token, token));
+            if !valid {
+                let mut response =
+                    error(StatusCode::UNAUTHORIZED, "invalid administrator credential");
+                response
+                    .headers_mut()
+                    .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+                if is_virtual_key_endpoint {
+                    response
+                        .headers_mut()
+                        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+                }
+                return response;
+            }
+        }
+    }
+
+    let mut response = next.run(request).await;
+    if is_virtual_key_endpoint {
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
+    response
+}
+
+pub(crate) fn error(status: StatusCode, message: impl Into<String>) -> Response {
     (
         status,
         Json(ErrorResponse {
@@ -91,8 +164,21 @@ async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
     })
 }
 
-async fn get_config(State(state): State<AppState>) -> Json<ModelConfigSet> {
-    Json(state.store.config().await)
+async fn get_config(State(state): State<AppState>) -> Response {
+    let config = match &state.virtual_key_mode {
+        Some(mode) => match mode.store.config().await {
+            Ok(config) => config,
+            Err(err) => {
+                tracing::error!(error = %err, "failed to read durable model configuration");
+                return error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "durable configuration is unavailable",
+                );
+            }
+        },
+        None => state.store.config().await,
+    };
+    Json(config).into_response()
 }
 
 async fn put_config(
@@ -107,6 +193,15 @@ async fn put_config(
         return error(StatusCode::BAD_REQUEST, message);
     }
 
+    if let Some(mode) = &state.virtual_key_mode {
+        if let Err(err) = mode.store.set_config(&config).await {
+            tracing::error!(error = %err, "failed to persist durable model configuration");
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "durable configuration is unavailable",
+            );
+        }
+    }
     state.store.set_config(config.clone()).await;
 
     let receivers = state
@@ -204,6 +299,19 @@ async fn list_usage_events(
     .into_response()
 }
 
+pub(crate) async fn publish_policy_hint(state: &AppState, mode: &crate::VirtualKeyMode) {
+    match mode.store.snapshot(now_ts()).await {
+        Ok(snapshot) => {
+            let _ = state
+                .broadcast
+                .send(ControlMessage::VirtualKeyPolicySnapshot(snapshot));
+        }
+        Err(err) => {
+            tracing::error!(error = %err, "failed to publish refreshed virtual-key policy snapshot");
+        }
+    }
+}
+
 /// Contract-first drift guard.
 ///
 /// `contract/openapi.yaml` is authored before the handlers. These tests parse it
@@ -255,6 +363,7 @@ mod contract_tests {
                 .apply_daemon_message(
                     CONNECTION_ID,
                     DaemonMessage::Telemetry(Telemetry {
+                        virtual_key_id: None,
                         daemon_id: "daemon-1".to_string(),
                         model_name: model_name.to_string(),
                         prompt_tokens: 3,
@@ -277,6 +386,7 @@ mod contract_tests {
                 store,
                 broadcast,
                 started_at: now_ts(),
+                virtual_key_mode: None,
             },
             cors,
         )
@@ -392,6 +502,12 @@ mod contract_tests {
             let Some(operation) = item.get("get") else {
                 continue;
             };
+            if path.starts_with("/key/") {
+                let (status, body) = call(app().await, "get", path, None).await;
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "GET {path}");
+                assert!(body["error"].is_string());
+                continue;
+            }
             let schema = &operation["responses"]["200"]["content"]["application/json"]["schema"];
             let schema_name = schema_ref_name(schema)
                 .unwrap_or_else(|| panic!("GET {path} 200 response should reference a schema"));
@@ -490,6 +606,20 @@ mod contract_tests {
             .await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "query: {query}");
             assert!(body["error"].is_string(), "query: {query}");
+        }
+    }
+
+    #[tokio::test]
+    async fn virtual_key_routes_report_unavailable_without_opt_in_storage() {
+        for (method, path, body) in [
+            ("get", "/key/list", None),
+            ("post", "/key/generate", Some("{}")),
+            ("get", "/key/info?key=unknown", None),
+            ("post", "/key/delete", Some("{\"keys\":[]}")),
+        ] {
+            let (status, response) = call(app().await, method, path, body).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{method} {path}");
+            assert!(response["error"].is_string());
         }
     }
 

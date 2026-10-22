@@ -33,6 +33,12 @@ plane's `cors_allowed_origins`.
 
 ## Data flow
 
+In authenticated virtual-key deployments, operators apply an administrator
+token through the password input in `App`. `client.ts` keeps it in memory and
+adds an Authorization header to management calls; it is not stored in browser
+storage or build-time configuration. Reloading requires applying the token
+again. The form clears its input immediately after applying it.
+
 ```mermaid
 flowchart LR
     hook[useDashboard<br/>every 3 s] -- GET /v1/status<br/>GET /v1/daemons<br/>GET /v1/usage/events?limit=25<br/>GET /v1/config --> cp[(Control plane)]
@@ -90,9 +96,8 @@ the contract unnoticed.
 
 ## Known gaps
 
-- No authentication: the contract declares bearer auth, but the client sends
-  no token. A login flow (rather than a token baked into the bundle) is needed
-  once the control plane enforces auth.
+- Authentication uses a manually applied administrator token; a full login
+  flow and a dedicated virtual-key lifecycle UI are not implemented.
 - Polling instead of push. A server-sent events or WebSocket feed would reduce
   latency and load with many dashboards open.
 - No structured model editor or client-side schema validation.

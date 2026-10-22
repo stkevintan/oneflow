@@ -19,15 +19,15 @@ info:
          `control-plane/src/api.rs` against the real router.
 
     Conventions:
-      * Every path is versioned under `/v1`. Breaking changes require `/v2`.
+      * Management resources use `/v1`; LiteLLM-style key management uses `/key/*`.
       * Every error body is an `ErrorResponse`, including 404 for unknown paths.
-      * Timestamps are Unix seconds (`int64`).
-      * Collections are wrapped in an object with an `items` array so they can
+      * `/v1` timestamps are Unix seconds (`int64`); `/key/*` uses RFC 3339.
+      * `/v1` collections are wrapped in an object with an `items` array so they can
         gain pagination fields without breaking clients.
 
     Authentication: operations require `Authorization: Bearer <token>` unless
-    they declare `security: []`. The scheme is declared now so clients are
-    built for it; the control plane does not enforce it yet.
+    they declare `security: []`. Authentication is enforced when virtual-key storage is configured;
+    legacy mode retains the unauthenticated proof-of-concept API.
 
     Out of scope: the daemon WebSocket control channel (`/control`) is a
     transport endpoint, not a JSON resource; its messages are defined in
@@ -208,12 +208,151 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
+  /key/generate:
+    post:
+      operationId: generateKey
+      summary: Generate a key (LiteLLM-style supported subset)
+      description: |
+        Commits the key and policy revision durably before responding.
+        A successful response does not mean every daemon has applied the policy.
+        The plaintext secret is not retained and cannot be recovered.
+        A lost response requires creating a replacement and revoking the old key;
+        automatic retries may create additional keys.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerateKeyRequest"
+      responses:
+        "200":
+          description: Created; the only response containing the plaintext key
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenerateKeyResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /key/list:
+    get:
+      operationId: listKeys
+      summary: List non-deleted keys with LiteLLM-style pagination
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: size
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 10
+        - name: return_full_object
+          in: query
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Hash identifiers by default; metadata objects when return_full_object=true
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KeyListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /key/info:
+    get:
+      operationId: keyInfo
+      summary: Get metadata using a key hash (preferred) or raw key
+      description: |
+        Requires an administrator token. Supply SHA-256 rather than a raw key
+        to keep bearer secrets out of URL/access logs. The response always
+        normalizes key to the hash and never echoes the raw secret.
+      parameters:
+        - name: key
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Key metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KeyInfoResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /key/delete:
+    post:
+      operationId: deleteKeys
+      summary: Delete keys from active use
+      description: |
+        Accepts plaintext keys or SHA-256 hashes; hashes are preferred.
+        Atomically revokes all requested keys. Unknown identifiers return 404
+        without deleting any key. Repeated deletion is idempotent. Metadata is
+        retained for audit/info, but deleted keys are absent from key/list.
+        Existing leases and admitted requests follow the bounded revocation rules.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteKeysRequest"
+      responses:
+        "200":
+          description: Deleted identifiers normalized to hashes (never raw secrets)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteKeysResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
-      description: Declared for clients; not yet enforced by the control plane.
+      description: Management administrator credential in virtual-key mode; never an inference virtual key.
 
   responses:
     BadRequest:
@@ -235,7 +374,129 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
 
+    Forbidden:
+      description: Authenticated caller is not a management administrator
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    Unavailable:
+      description: Durable key storage is unavailable
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
   schemas:
+    GenerateKeyRequest:
+      type: object
+      additionalProperties: false
+      required: [models]
+      description: |
+        LiteLLM-style subset. Explicit non-empty models are required; unlike
+        LiteLLM, empty/omitted models do NOT grant all-model access. Unsupported
+        fields (budgets, rate limits, metadata, user/team IDs) return 400.
+      properties:
+        key_alias:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 128
+          description: Optional display label; generated when omitted or null.
+        models:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            pattern: "^[^*]+$"
+        duration:
+          type: [string, "null"]
+          pattern: "^[0-9]+[smhd]$"
+          description: Positive duration (for example 30d); omitted/null means no key expiry.
+    KeyMetadata:
+      type: object
+      required: [token, token_id, key_alias, models, expires, created_at, blocked]
+      properties:
+        token:
+          type: string
+          description: SHA-256 identifier, not a usable inference credential.
+        token_id:
+          type: string
+          description: Oneflow internal key ID, also used in telemetry.
+        key_alias:
+          type: string
+        models:
+          type: array
+          items:
+            type: string
+        expires:
+          type: [string, "null"]
+          description: RFC 3339 UTC timestamp or null.
+        created_at:
+          type: string
+          description: RFC 3339 UTC timestamp.
+        blocked:
+          type: boolean
+          description: True when permanently deleted/revoked.
+    GenerateKeyResponse:
+      allOf:
+        - $ref: "#/components/schemas/KeyMetadata"
+        - type: object
+          required: [key]
+          properties:
+            key:
+              type: string
+              description: One-time plaintext key; starts with sk-. Never log it.
+    KeyInfoResponse:
+      type: object
+      required: [key, info]
+      properties:
+        key:
+          type: string
+          description: Normalized SHA-256 key hash, including when lookup used plaintext.
+        info:
+          $ref: "#/components/schemas/KeyMetadata"
+    KeyListResponse:
+      type: object
+      required: [keys, total_count, current_page, total_pages]
+      properties:
+        keys:
+          type: array
+          items:
+            oneOf:
+              - type: string
+              - $ref: "#/components/schemas/KeyMetadata"
+        total_count:
+          type: integer
+          format: int64
+        current_page:
+          type: integer
+          format: int64
+        total_pages:
+          type: integer
+          format: int64
+    DeleteKeysRequest:
+      type: object
+      additionalProperties: false
+      required: [keys]
+      properties:
+        keys:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            type: string
+    DeleteKeysResponse:
+      type: object
+      required: [deleted_keys]
+      properties:
+        deleted_keys:
+          type: array
+          items:
+            type: string
+          description: Hashes only; plaintext inputs are never echoed.
     HealthResponse:
       type: object
       required: [status, version]
@@ -328,6 +589,8 @@ components:
         - failed_requests
         - total_prompt_tokens
         - total_completion_tokens
+        - auth_policy_revision
+        - auth_policy_valid_until
       properties:
         connection_id:
           type: string
@@ -378,6 +641,15 @@ components:
           format: int64
           minimum: 0
 
+        auth_policy_revision:
+          type: [integer, "null"]
+          format: int64
+          description: Last acknowledged virtual-key policy revision.
+        auth_policy_valid_until:
+          type: [integer, "null"]
+          format: int64
+          description: Last acknowledged policy lease deadline, in Unix seconds.
+
     UsageEventPage:
       type: object
       required: [items, next_cursor]
@@ -405,6 +677,7 @@ components:
         - latency_ms
         - streamed
         - received_at
+        - virtual_key_id
       properties:
         request_id:
           type: string
@@ -441,6 +714,9 @@ components:
         streamed:
           type: boolean
           description: Whether the client requested a streaming response.
+        virtual_key_id:
+          type: [string, "null"]
+          description: Non-secret virtual key ID; null for legacy inference.
         received_at:
           type: integer
           format: int64

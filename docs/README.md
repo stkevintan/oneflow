@@ -16,7 +16,8 @@ L2 is split by component:
 - [Daemon](./L2-detailed-design/daemon.md)
 - [Web dashboard](./L2-detailed-design/web.md)
 - [Configuration](./L2-detailed-design/configuration.md)
-- [Virtual keys (proposed, not implemented)](./L2-detailed-design/virtual-keys.md)
+- [Virtual-key deployment and usage](./virtual-keys.md)
+- [Virtual-key design](./L2-detailed-design/virtual-keys.md)
 
 These documents describe the code as it is, and mark where an accepted
 decision changes it. Planned work is listed under "Known gaps" in

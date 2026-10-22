@@ -8,6 +8,19 @@
 #![allow(clippy::let_unit_value)]
 #![allow(unreachable_patterns)]
 use serde::{Deserialize, Serialize};
+/// Serde normally maps both a missing `Option<T>` field and an
+/// explicit JSON null to `None`. Wrapping the decoded value in
+/// `Some` retains the field-presence bit for `Option<Option<T>>`.
+mod tri_state_serde {
+    use serde::{Deserialize, Deserializer};
+    pub fn deserialize<'de, D, T>(de: D) -> Result<Option<T>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Deserialize<'de>,
+    {
+        T::deserialize(de).map(Some)
+    }
+}
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UsageEventPage {
     ///Newest first.
@@ -40,6 +53,8 @@ pub struct UsageEvent {
 are then zero because they are unknown, not because they are zero.
 */
     pub usage_reported: bool,
+    ///Non-secret virtual key ID; null for legacy inference.
+    pub virtual_key_id: Option<String>,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModelConfigSet {
@@ -74,6 +89,57 @@ pub struct ModelConfigParameters {
     pub additional_properties: std::collections::BTreeMap<String, String>,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct KeyListResponse {
+    pub current_page: i64,
+    pub keys: Vec<KeyListResponseKeysItemUnion>,
+    pub total_count: i64,
+    pub total_pages: i64,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum KeyListResponseKeysItemUnion {
+    String(String),
+    KeyMetadata(KeyMetadata),
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct KeyInfoResponse {
+    pub info: KeyMetadata,
+    ///Normalized SHA-256 key hash, including when lookup used plaintext.
+    pub key: String,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GenerateKeyResponse {
+    ///True when permanently deleted/revoked.
+    pub blocked: bool,
+    ///RFC 3339 UTC timestamp.
+    pub created_at: String,
+    ///RFC 3339 UTC timestamp or null.
+    pub expires: Option<String>,
+    ///One-time plaintext key; starts with sk-. Never log it.
+    pub key: String,
+    pub key_alias: String,
+    pub models: Vec<String>,
+    ///SHA-256 identifier, not a usable inference credential.
+    pub token: String,
+    ///Oneflow internal key ID, also used in telemetry.
+    pub token_id: String,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct KeyMetadata {
+    ///True when permanently deleted/revoked.
+    pub blocked: bool,
+    ///RFC 3339 UTC timestamp.
+    pub created_at: String,
+    ///RFC 3339 UTC timestamp or null.
+    pub expires: Option<String>,
+    pub key_alias: String,
+    pub models: Vec<String>,
+    ///SHA-256 identifier, not a usable inference credential.
+    pub token: String,
+    ///Oneflow internal key ID, also used in telemetry.
+    pub token_id: String,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DaemonList {
     pub items: Vec<Daemon>,
 }
@@ -81,6 +147,10 @@ pub struct DaemonList {
 pub struct Daemon {
     ///Constraint: minimum=0
     pub active_requests: i64,
+    ///Last acknowledged virtual-key policy revision.
+    pub auth_policy_revision: Option<i64>,
+    ///Last acknowledged policy lease deadline, in Unix seconds.
+    pub auth_policy_valid_until: Option<i64>,
     pub capabilities: Vec<String>,
     pub cluster_name: Option<String>,
     ///Unix timestamp in seconds.
@@ -104,9 +174,120 @@ pub struct Daemon {
     pub version: Option<String>,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DeleteKeysRequest {
+    ///Constraint: minItems=1, maxItems=100
+    pub keys: Vec<String>,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DeleteKeysResponse {
+    ///Hashes only; plaintext inputs are never echoed.
+    pub deleted_keys: Vec<String>,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ErrorResponse {
     ///Human-readable error message.
     pub error: String,
+}
+/**LiteLLM-style subset. Explicit non-empty models are required; unlike
+LiteLLM, empty/omitted models do NOT grant all-model access. Unsupported
+fields (budgets, rate limits, metadata, user/team IDs) return 400.
+*/
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GenerateKeyRequest {
+    ///Positive duration (for example 30d); omitted/null means no key expiry.
+    ///Constraint: pattern=`^[0-9]+[smhd]$`
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "tri_state_serde::deserialize"
+    )]
+    pub duration: Option<Option<String>>,
+    ///Optional display label; generated when omitted or null.
+    ///Constraint: minLength=1, maxLength=128
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "tri_state_serde::deserialize"
+    )]
+    pub key_alias: Option<Option<String>>,
+    ///Constraint: minItems=1, uniqueItems=true
+    pub models: Vec<String>,
+}
+impl GenerateKeyRequest {
+    /// Construct this request with every required wire field.
+    pub fn new(models: Vec<String>) -> Self {
+        Self {
+            models,
+            duration: None,
+            key_alias: None,
+        }
+    }
+    /// Start a dependency-free builder with every required wire field.
+    pub fn builder(models: Vec<String>) -> GenerateKeyRequestBuilder {
+        GenerateKeyRequestBuilder::new(models)
+    }
+}
+/// Dependency-free builder for [`#struct_name`].
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct GenerateKeyRequestBuilder {
+    value: GenerateKeyRequest,
+}
+impl GenerateKeyRequestBuilder {
+    /// Start a builder with every required wire field.
+    pub fn new(models: Vec<String>) -> Self {
+        Self {
+            value: GenerateKeyRequest::new(models),
+        }
+    }
+    #[doc = concat!(
+        "Set the optional nullable `", "duration", "` request field to a value."
+    )]
+    #[must_use]
+    pub fn duration(mut self, duration: String) -> Self {
+        self.value.duration = Some(Some(duration));
+        self
+    }
+    #[doc = concat!(
+        "Set the optional nullable `", "duration", "` request field to JSON null."
+    )]
+    #[must_use]
+    pub fn duration_null(mut self) -> Self {
+        self.value.duration = Some(None);
+        self
+    }
+    #[doc = concat!("Omit the optional nullable `", "duration", "` request field.")]
+    #[must_use]
+    pub fn duration_absent(mut self) -> Self {
+        self.value.duration = None;
+        self
+    }
+    #[doc = concat!(
+        "Set the optional nullable `", "key_alias", "` request field to a value."
+    )]
+    #[must_use]
+    pub fn key_alias(mut self, key_alias: String) -> Self {
+        self.value.key_alias = Some(Some(key_alias));
+        self
+    }
+    #[doc = concat!(
+        "Set the optional nullable `", "key_alias", "` request field to JSON null."
+    )]
+    #[must_use]
+    pub fn key_alias_null(mut self) -> Self {
+        self.value.key_alias = Some(None);
+        self
+    }
+    #[doc = concat!("Omit the optional nullable `", "key_alias", "` request field.")]
+    #[must_use]
+    pub fn key_alias_absent(mut self) -> Self {
+        self.value.key_alias = None;
+        self
+    }
+    /// Finish building the request model.
+    pub fn build(self) -> GenerateKeyRequest {
+        self.value
+    }
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HealthResponse {

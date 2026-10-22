@@ -20,6 +20,11 @@ export interface UsageEventQuery {
 
 /** Control-plane origin; empty means same origin (dev/preview proxy). */
 const BASE_URL = (import.meta.env.VITE_CONTROL_PLANE_URL ?? "").replace(/\/+$/, "");
+let adminToken = "";
+
+export function setAdminToken(token: string): void {
+  adminToken = token.trim();
+}
 
 export class ApiError extends Error {
   readonly status: number;
@@ -48,6 +53,7 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     headers: {
       accept: "application/json",
+      ...(adminToken ? { authorization: `Bearer ${adminToken}` } : {}),
       ...(init?.body ? { "content-type": "application/json" } : {}),
       ...init?.headers,
     },

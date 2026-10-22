@@ -8,11 +8,16 @@ serve OpenAI-compatible requests locally, and report usage and health telemetry.
 Inference traffic flows directly from each daemon to its configured model
 provider. It does not pass through the control plane.
 
-> **Proof of concept:** The current control plane keeps configuration, daemon
-> presence, and usage history in memory, so this state is lost when it restarts.
-> The management API declares bearer authentication in its contract but does
-> not enforce it yet. See [known gaps](docs/L1-system-design.md#known-gaps) and
+> **Legacy-mode proof of concept:** By default the control plane keeps
+> configuration, daemon presence, and usage history in memory, so this state
+> is lost when it restarts. Legacy mode does not enforce management
+> authentication. See [known gaps](docs/L1-system-design.md#known-gaps) and
 > [ADR 0001](docs/adr/0001-api-only-stateless-control-plane.md).
+
+For managed inference access, see [virtual-key deployment](docs/virtual-keys.md).
+This opt-in mode adds PostgreSQL-backed model configuration and key lifecycle,
+administrator authentication, authenticated daemon connections, and leased
+model allowlists. Legacy mode remains a proof of concept.
 
 ## Architecture
 

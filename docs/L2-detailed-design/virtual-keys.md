@@ -1,9 +1,9 @@
-# Virtual keys (proposed; not implemented)
+# Virtual keys
 
-This document specifies the next access-control feature, not current behavior.
-Today `DAEMON_API_KEYS` is a local shared-key list, management authentication is
-not enforced, and the control channel is not authenticated. None of those
-mechanisms is sufficient to deploy the design below safely.
+Virtual-key mode adds durable key management and leased local inference
+authorization. It is opt-in; legacy mode retains the local `DAEMON_API_KEYS`
+list and the proof-of-concept management API. Never expose legacy management
+endpoints to an untrusted network.
 
 ## Scope and contracts
 
@@ -12,14 +12,12 @@ key expiry, and explicit model allowlists. Keys are immutable except for
 revocation; rotate by creating a replacement, updating the app, then revoking
 the old key. Budgets, rate limits, teams, and per-user RBAC are deferred.
 
-- [Proposed management OpenAPI](../../contract/virtual-keys.openapi.yaml)
-- [Proposed control-message JSON Schema](../../contract/virtual-key-control.schema.json)
+- [Management OpenAPI](../../contract/openapi.yaml)
+- [Control-message JSON Schema](../../contract/virtual-key-control.schema.json)
 
-These contracts are intentionally separate from the implemented
-[management contract](../../contract/openapi.yaml). Existing generators and
-router drift tests continue to target only the implemented contract.
-Do not add runtime routes, generated bindings, or Rust protocol variants until
-implementation begins.
+The management routes are part of the live contract and generated Rust and
+TypeScript DTOs. The WebSocket messages are defined in the shared Rust protocol.
+See [deployment and usage](../virtual-keys.md) for setup and curl examples.
 
 ## Credentials and request flow
 
@@ -52,20 +50,24 @@ preferred.
 
 The control plane generates a random 128-bit ID (32 lowercase hex characters)
 and an independent cryptographically random 256-bit secret. The token format
-is `ofk_<id>_<secret hex>`. Store only SHA-256 of the complete UTF-8 token,
+is `sk-<id>_<secret hex>`; older `ofk_<id>_<secret hex>` keys remain valid.
+Store only SHA-256 of the complete UTF-8 token,
 alongside metadata; never accept the hash itself as a credential. High-entropy
 server-generated secrets make a fast hash suitable here; this is not password
 storage. Daemons extract the ID, look up its policy, and compare the token hash
 in constant time.
 
 Creation returns the plaintext token once with `Cache-Control: no-store`.
-Read/list/revoke responses expose neither token nor hash. Redact request
+Info/list/delete responses expose only hash identifiers, never bearer secrets.
+The LiteLLM-style `/key/*` shapes are described in
+[deployment and migration](../virtual-keys.md#litellm-compatibility-and-migration).
+Redact request
 Authorization headers and creation response bodies in application logs,
 reverse proxies, tracing, and audit records. All management responses involving
 keys should be non-cacheable.
 
 The create response is not recoverable. If it is lost, list metadata, identify
-the orphaned key by ID, revoke it, and create a replacement. Display names are
+the orphaned key by its hash, delete it, and create a replacement. Display names are
 not unique and must never be used as identifiers.
 
 Expiry is checked at request admission: `now >= expires_at` rejects a key.
@@ -77,7 +79,7 @@ increment the revision, so identical revisions always have identical policies.
 Admitted requests,
 including streams, are not cancelled by later expiry or revocation.
 
-Use durable PostgreSQL storage before exposing creation. Store key rows and a
+Virtual-key mode uses durable PostgreSQL storage. Store key rows and a
 singleton monotonic policy revision in transactions; creation/revocation
 increments the revision in the same transaction. Do not recreate usable keys
 from defaults after restart or claim success when storage is unavailable.
@@ -85,9 +87,11 @@ Notifications are hints: periodic refresh reads a transactionally consistent
 revision and non-revoked policy set from the database, not a stale per-process cache.
 Serialize mutations against model-config updates when validating allowlists.
 
-Listing uses keyset pagination on `(created_at, id)` descending, not offsets.
-Concurrent insertions appear on a new traversal; returned metadata reflects
-current revocation state. Invalid or inconsistent cursors return 400.
+Listing uses LiteLLM-style `page`/`size` pagination, ordered by
+`(created_at, id)` descending. Each page's rows and count share one database
+snapshot. Concurrent insertion/deletion can shift later pages; the listing is
+not a stable export. Deleted keys are excluded but retained for info/audit.
+Invalid pagination and unsupported filters return 400.
 
 ## Model permissions and inference errors
 
@@ -151,7 +155,7 @@ snapshot with an explicit error log. Preserve the prior cache only until its
 original deadline. Send `VirtualKeyPolicyAck` only after successful apply.
 Acknowledgements echo revision and deadline and are associated with the
 authenticated connection; expose last acknowledgement and lease deadline in
-future daemon status so operators can inspect propagation.
+daemon status so operators can inspect propagation.
 
 - Lease duration: at most **300 seconds** from issuance, not receipt.
 - Accept only `issued_at < valid_until <= issued_at + 300`, an unexpired
@@ -181,7 +185,7 @@ daemon identities to credentials rather than trusting a claimed `daemon_id`.
 Hashes are not bearer secrets, but the control channel can change all access
 policies and must be trusted. Non-loopback inference clients need HTTPS.
 
-Add explicit daemon `auth_mode = "virtual_keys"` as an opt-in rollout setting.
+Use daemon `auth_mode = "virtual_keys"` as an opt-in rollout setting.
 Initially preserve legacy `DAEMON_API_KEYS` behavior in legacy mode. In
 virtual-key mode, never fall back to those static keys or anonymous access;
 reject startup if static keys are configured, to avoid ambiguous authorization.
@@ -196,7 +200,7 @@ explicit auth mode; migrate apps before removing static keys.
 ## Implementation acceptance criteria
 
 1. Management auth rejects virtual keys; storage survives restarts; creation
-   reveals a token once; list/read/revoke never reveal token/hash.
+   reveals a token once; info/list/delete never reveal a bearer secret.
 2. Validation covers future/null expiry, unknown/duplicate/wildcard models,
    pagination, lost-create-response handling, and idempotent revocation.
 3. Inference covers the error table, model-list filtering, alias rewriting,
@@ -207,7 +211,6 @@ explicit auth mode; migrate apps before removing static keys.
 5. Multi-instance tests cover durable revision ordering, mutation/refresh
    races, acknowledgements, and an empty snapshot that removes every key.
 6. Legacy mode remains unchanged; virtual-key mode cannot silently downgrade.
-7. At implementation time, merge the management proposal into the live
-   contract, regenerate bindings, implement the protocol schema in Rust,
-   extend daemon status/usage contracts, and run router drift and integration
-   tests. Remove proposal-only files once the live contracts replace them.
+7. Keep generated bindings synchronized with the live management contract;
+   validate the Rust control messages against their schema and run router
+   drift and integration tests.

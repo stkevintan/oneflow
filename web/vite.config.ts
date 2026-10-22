@@ -51,9 +51,12 @@ if (!webAddress.port) {
 }
 
 // The control plane is API-only. Both the dev server and `vite preview` proxy
-// `/v1` to it, so the dashboard runs locally without CORS configuration. A
+// `/v1` and `/key` to it, so the dashboard runs locally without CORS configuration. A
 // bundle hosted elsewhere sets VITE_CONTROL_PLANE_URL at build time instead.
 const apiProxy = {
+  "/key": {
+    target: controlPlaneWebSocketUrl.origin,
+  },
   "/v1": {
     target: controlPlaneWebSocketUrl.origin,
   },

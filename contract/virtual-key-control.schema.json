@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Proposed Oneflow virtual-key control messages (not implemented)",
+  "title": "Oneflow virtual-key control messages",
   "description": "Additional WebSocket messages, not a replacement for existing messages. See the virtual-key design for ordering, trusted transport, and lease validation.",
   "oneOf": [
     { "$ref": "#/$defs/PolicySnapshot" },

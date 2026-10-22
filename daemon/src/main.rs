@@ -1,4 +1,5 @@
 mod api;
+mod auth;
 mod upstream;
 
 use std::{
@@ -14,6 +15,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use auth::{AuthMode, PolicyCache};
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use protocol::{ControlMessage, DaemonMessage, Heartbeat, ModelConfig, Registration, Telemetry};
@@ -22,7 +24,10 @@ use tokio::{
     sync::{mpsc, RwLock},
     time,
 };
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{client::IntoClientRequest, Message},
+};
 use tracing::{error, info, warn};
 
 const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 5_000;
@@ -40,6 +45,9 @@ struct Args {
     /// Config file to read (defaults to ./config.toml when present).
     #[arg(short, long, value_name = "PATH")]
     config: Option<PathBuf>,
+    /// Inference authentication mode (default: legacy).
+    #[arg(long, value_enum)]
+    auth_mode: Option<AuthMode>,
     /// HTTP listener address.
     #[arg(long, value_name = "SOCKET")]
     listen_addr: Option<String>,
@@ -63,6 +71,7 @@ struct Args {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct DaemonConfig {
+    auth_mode: Option<AuthMode>,
     cp: Option<String>,
     listen_addr: Option<String>,
     daemon_id: Option<String>,
@@ -98,6 +107,7 @@ impl DaemonConfig {
     }
 
     fn resolve(args: &Args, file: Self) -> Result<ResolvedConfig> {
+        let auth_mode = args.auth_mode.or(file.auth_mode).unwrap_or_default();
         let cp = args
             .cp
             .clone()
@@ -138,7 +148,39 @@ impl DaemonConfig {
             .or(file.max_response_bytes)
             .unwrap_or(DEFAULT_MAX_RESPONSE_BYTES);
 
+        let control_token = if auth_mode == AuthMode::VirtualKeys {
+            anyhow::ensure!(
+                env_list("DAEMON_API_KEYS").is_empty(),
+                "DAEMON_API_KEYS must be unset in virtual_keys mode"
+            );
+            let token = env::var("ONEFLOW_DAEMON_TOKEN")
+                .context("ONEFLOW_DAEMON_TOKEN is required in virtual_keys mode")?;
+            anyhow::ensure!(!token.trim().is_empty(), "ONEFLOW_DAEMON_TOKEN is empty");
+            let url = url::Url::parse(&cp).context("invalid control-plane URL")?;
+            anyhow::ensure!(
+                url.scheme() == "wss"
+                    || (url.scheme() == "ws"
+                        && url.host_str().is_some_and(|host| {
+                            host == "localhost"
+                                || host
+                                    .trim_start_matches('[')
+                                    .trim_end_matches(']')
+                                    .parse::<std::net::IpAddr>()
+                                    .is_ok_and(|ip| ip.is_loopback())
+                        })),
+                "virtual_keys requires wss for non-loopback control connections"
+            );
+            anyhow::ensure!(
+                url.username().is_empty() && url.password().is_none() && url.query().is_none(),
+                "put control credentials in ONEFLOW_DAEMON_TOKEN, not the URL"
+            );
+            Some(token)
+        } else {
+            None
+        };
         Ok(ResolvedConfig {
+            control_token,
+            auth_mode,
             cp,
             listen_addr,
             daemon_id,
@@ -151,6 +193,8 @@ impl DaemonConfig {
 }
 
 struct ResolvedConfig {
+    control_token: Option<String>,
+    auth_mode: AuthMode,
     cp: String,
     listen_addr: String,
     daemon_id: String,
@@ -236,11 +280,83 @@ mod config_tests {
         assert_eq!(resolved.cp, "ws://cli.example:4000/control");
         assert_eq!(resolved.listen_addr, "127.0.0.1:9001");
     }
+
+    #[tokio::test]
+    async fn authenticated_control_channel_applies_snapshot_and_acknowledges() {
+        let args = Args::try_parse_from(["oneflowd", "--cp", "ws://localhost/control"]).unwrap();
+        let resolved = DaemonConfig::resolve(&args, DaemonConfig::default()).unwrap();
+        let mut settings = DaemonSettings::from_config(&resolved);
+        settings.auth_mode = AuthMode::VirtualKeys;
+        settings.control_token = Some("test-control-token".into());
+        let request = control_request("ws://localhost/control", &settings).unwrap();
+        assert_eq!(
+            request.headers()["authorization"],
+            "Bearer test-control-token"
+        );
+        assert_eq!(request.headers()["x-oneflow-daemon-id"], settings.daemon_id);
+        let (tx, rx) = mpsc::channel(1);
+        let state = AppState::new(settings, tx).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let message = socket.next().await.unwrap().unwrap();
+            let registration: DaemonMessage =
+                serde_json::from_str(message.to_text().unwrap()).unwrap();
+            match registration {
+                DaemonMessage::Registration(reg) => {
+                    assert!(reg.capabilities.iter().any(|cap| cap == "virtual-keys-v1"))
+                }
+                _ => panic!("first frame must register"),
+            }
+            let snapshot = protocol::VirtualKeyPolicySnapshot {
+                protocol_version: 1,
+                revision: 7,
+                issued_at: now_ts(),
+                valid_until: now_ts() + 300,
+                keys: vec![],
+            };
+            let deadline = snapshot.valid_until;
+            socket
+                .send(Message::Text(
+                    serde_json::to_string(&ControlMessage::VirtualKeyPolicySnapshot(snapshot))
+                        .unwrap(),
+                ))
+                .await
+                .unwrap();
+            loop {
+                let message = socket.next().await.unwrap().unwrap();
+                let message: DaemonMessage =
+                    serde_json::from_str(message.to_text().unwrap()).unwrap();
+                if let DaemonMessage::VirtualKeyPolicyAck(ack) = message {
+                    assert_eq!(ack.revision, 7);
+                    assert_eq!(ack.valid_until, deadline);
+                    break;
+                }
+            }
+        });
+        let task = tokio::spawn(run_control_channel(
+            format!("ws://{address}/control"),
+            "test".into(),
+            "test".into(),
+            state,
+            rx,
+        ));
+        let result = time::timeout(Duration::from_secs(3), server).await;
+        task.abort();
+        let _ = task.await;
+        result
+            .expect("policy acknowledgement must not deadlock")
+            .unwrap();
+    }
 }
 
 /// Tunables resolved once at startup from the config file and environment.
 #[derive(Clone)]
 pub(crate) struct DaemonSettings {
+    pub(crate) control_token: Option<String>,
+    pub(crate) auth_mode: AuthMode,
     pub(crate) daemon_id: String,
     /// Client-facing keys for `/v1/*`. Empty means the API is open.
     pub(crate) api_keys: Vec<String>,
@@ -253,6 +369,8 @@ pub(crate) struct DaemonSettings {
 impl DaemonSettings {
     fn from_config(config: &ResolvedConfig) -> Self {
         Self {
+            control_token: config.control_token.clone(),
+            auth_mode: config.auth_mode,
             daemon_id: config.daemon_id.clone(),
             api_keys: env_list("DAEMON_API_KEYS"),
             connect_timeout: Duration::from_millis(config.connect_timeout_ms),
@@ -265,6 +383,7 @@ impl DaemonSettings {
 
 #[derive(Clone)]
 pub(crate) struct AppState {
+    pub(crate) policies: Arc<RwLock<PolicyCache>>,
     pub(crate) settings: Arc<DaemonSettings>,
     pub(crate) models: Arc<RwLock<HashMap<String, ModelConfig>>>,
     pub(crate) models_updated_at: Arc<AtomicI64>,
@@ -286,6 +405,7 @@ impl AppState {
             .build()?;
 
         Ok(Self {
+            policies: Arc::new(RwLock::new(PolicyCache::default())),
             settings: Arc::new(settings),
             models: Arc::new(RwLock::new(HashMap::new())),
             models_updated_at: Arc::new(AtomicI64::new(now_ts())),
@@ -398,6 +518,7 @@ fn env_list(name: &str) -> Vec<String> {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "oneflowd=info".into()),
@@ -408,6 +529,7 @@ async fn main() -> Result<()> {
     let config = DaemonConfig::load_default_or_explicit(args.config.as_deref())?;
     let config = DaemonConfig::resolve(&args, config)?;
     let settings = DaemonSettings::from_config(&config);
+    control_request(&config.cp, &settings)?;
     let control_plane_url = config.cp;
     let listen_addr: SocketAddr = config
         .listen_addr
@@ -416,7 +538,7 @@ async fn main() -> Result<()> {
     let cluster_name = env::var("CLUSTER_NAME").unwrap_or_else(|_| "cluster-ssh198".to_string());
     let hostname = env::var("HOSTNAME").unwrap_or_else(|_| "unknown".to_string());
 
-    if settings.api_keys.is_empty() {
+    if settings.auth_mode == AuthMode::Legacy && settings.api_keys.is_empty() {
         warn!("DAEMON_API_KEYS is unset: /v1/* is open to anyone who can reach this port");
     }
 
@@ -454,14 +576,28 @@ async fn run_control_channel(
 ) {
     loop {
         info!(state = "connecting", url = %control_plane_url, "connecting to control plane");
-        match connect_async(&control_plane_url).await {
+        let request = match control_request(&control_plane_url, &state.settings) {
+            Ok(request) => request,
+            Err(error) => {
+                error!(%error, "invalid control connection credentials; control task stopped");
+                return;
+            }
+        };
+        match connect_async(request).await {
             Ok((mut socket, _)) => {
                 info!(state = "connected", url = %control_plane_url, "connected to control plane");
                 let registration = DaemonMessage::Registration(Registration {
                     daemon_id: state.settings.daemon_id.clone(),
                     cluster_name: cluster_name.clone(),
                     version: env!("CARGO_PKG_VERSION").to_string(),
-                    capabilities: vec!["openai-compatible".to_string()],
+                    capabilities: if state.settings.auth_mode == AuthMode::VirtualKeys {
+                        vec![
+                            "openai-compatible".to_string(),
+                            "virtual-keys-v1".to_string(),
+                        ]
+                    } else {
+                        vec!["openai-compatible".to_string()]
+                    },
                     hostname: hostname.clone(),
                 });
 
@@ -497,7 +633,11 @@ async fn run_control_channel(
                             incoming = socket.next() => {
                                 match incoming {
                                     Some(Ok(Message::Text(text))) => {
-                                        handle_control_message(&text, &state).await;
+                                        if let Some(ack) = handle_control_message(&text, &state).await {
+                                            if send_daemon_message(&mut socket, &ack).await.is_err() {
+                                                break;
+                                            }
+                                        }
                                     }
                                     Some(Ok(Message::Ping(payload))) => {
                                         if socket.send(Message::Pong(payload)).await.is_err() {
@@ -538,8 +678,31 @@ async fn run_control_channel(
     }
 }
 
-async fn handle_control_message(text: &str, state: &AppState) {
+async fn handle_control_message(text: &str, state: &AppState) -> Option<DaemonMessage> {
     match serde_json::from_str::<ControlMessage>(text) {
+        Ok(ControlMessage::VirtualKeyPolicySnapshot(snapshot)) => {
+            if state.settings.auth_mode != AuthMode::VirtualKeys {
+                warn!("ignored virtual-key policy in legacy mode");
+                return None;
+            }
+            let result =
+                state
+                    .policies
+                    .write()
+                    .await
+                    .apply(snapshot, now_ts(), time::Instant::now());
+            match result {
+                Ok(ack) => {
+                    info!(
+                        revision = ack.revision,
+                        valid_until = ack.valid_until,
+                        "applied virtual-key policy"
+                    );
+                    return Some(DaemonMessage::VirtualKeyPolicyAck(ack));
+                }
+                Err(reason) => warn!(reason, "rejected virtual-key policy snapshot"),
+            }
+        }
         Ok(ControlMessage::ConfigUpdate { models, version }) => {
             let model_count = models.len();
             state.set_models(models).await;
@@ -550,6 +713,34 @@ async fn handle_control_message(text: &str, state: &AppState) {
         }
         Err(err) => warn!(error = %err, "received invalid control message"),
     }
+    None
+}
+
+fn control_request(
+    url: &str,
+    settings: &DaemonSettings,
+) -> Result<tokio_tungstenite::tungstenite::http::Request<()>> {
+    let mut request = url.into_client_request()?;
+    if settings.auth_mode == AuthMode::VirtualKeys {
+        let token = settings
+            .control_token
+            .as_deref()
+            .context("ONEFLOW_DAEMON_TOKEN is missing")?;
+        let mut authorization: tokio_tungstenite::tungstenite::http::HeaderValue =
+            format!("Bearer {token}")
+                .parse()
+                .context("ONEFLOW_DAEMON_TOKEN is not a valid HTTP header")?;
+        authorization.set_sensitive(true);
+        request.headers_mut().insert("authorization", authorization);
+        request.headers_mut().insert(
+            "x-oneflow-daemon-id",
+            settings
+                .daemon_id
+                .parse()
+                .context("daemon_id is not a valid HTTP header")?,
+        );
+    }
+    Ok(request)
 }
 
 async fn send_daemon_message<S>(
@@ -563,10 +754,7 @@ where
     let json = serde_json::to_string(message).map_err(|err| {
         error!(error = %err, "failed to serialize daemon message");
     })?;
-    socket
-        .send(Message::Text(json.into()))
-        .await
-        .map_err(|err| {
-            warn!(error = %err, "failed to send control channel message");
-        })
+    socket.send(Message::Text(json)).await.map_err(|err| {
+        warn!(error = %err, "failed to send control channel message");
+    })
 }

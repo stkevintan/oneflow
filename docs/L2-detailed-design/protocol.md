@@ -33,8 +33,9 @@ Generated files are never edited by hand. `protocol/src/generated` is marked
 
 ### Management API (v1)
 
-Conventions: JSON only; errors are always `ErrorResponse { error }`; timestamps
-are Unix seconds; collections are wrapped in an object (`{ items, … }`) so
+Conventions: JSON only; errors are always `ErrorResponse { error }`; `/v1`
+timestamps are Unix seconds; `/key/*` uses LiteLLM-style field names, RFC 3339
+timestamps and `keys` pagination. `/v1` collections are wrapped in an object (`{ items, … }`) so
 fields can be added without breaking clients. A global `bearerAuth` scheme is
 declared (with `/v1/health` exempt) but not yet enforced.
 
@@ -58,9 +59,10 @@ declared (with `/v1/health` exempt) but not yet enforced.
 
 ## Control-channel messages
 
-Proposed virtual-key management and additional control messages are specified
-separately in [virtual-keys.md](./virtual-keys.md). They are not implemented,
-not part of the live API contract, and not inputs to the current generators.
+Virtual-key management and additional control messages are specified in
+[virtual-keys.md](./virtual-keys.md). HTTP routes are in the live API contract;
+the additional WebSocket messages are described by
+[JSON Schema](../../contract/virtual-key-control.schema.json).
 
 Every frame is a JSON text frame with a `type` discriminator (`#[serde(tag = "type")]`).
 
@@ -70,6 +72,7 @@ Every frame is a JSON text frame with a `type` discriminator (`#[serde(tag = "ty
 | --- | --- | --- |
 | `ConfigUpdate` | `version`, `models: ModelConfig[]` | Sent on connect and on every accepted `PUT /v1/config`. The daemon replaces its entire model table. |
 | `Command` | `cmd`, `reason` | Reserved. Never sent by the control plane today; the daemon only logs it. |
+| `VirtualKeyPolicySnapshot` | `protocol_version`, `revision`, `issued_at`, `valid_until`, `keys[]` | Authenticated virtual-key deployments only; atomically replaces the leased authorization cache. |
 
 ```json
 {"type":"ConfigUpdate","version":"poc-v1","models":[{"model_name":"deepseek-v4-flash","provider":"custom_openai","api_base":"https://api.deepseek.com/v1","parameters":{"api_key_env":"DEEPSEEK_API_KEY"}}]}
@@ -86,6 +89,7 @@ the wire format did not change when the HTTP API moved to v1.
 | `Registration` | `daemon_id`, `cluster_name`, `version`, `capabilities[]`, `hostname` | Once, immediately after each connect |
 | `Heartbeat` | `daemon_id`, `active_requests`, `loaded_models[]` | Every 5 s |
 | `Telemetry` | `daemon_id`, `model_name`, `prompt_tokens`, `completion_tokens`, `success`, `request_id`, `latency_ms`, `status_code?`, `streamed`, `usage_reported` | After every upstream call completes or fails |
+| `VirtualKeyPolicyAck` | `protocol_version`, `revision`, `valid_until` | After applying a policy snapshot |
 
 ```json
 {"type":"Telemetry","daemon_id":"daemon-poc-001","model_name":"deepseek-v4-flash","prompt_tokens":12,"completion_tokens":40,"success":true,"request_id":"6f1c…","latency_ms":812,"status_code":200,"streamed":true,"usage_reported":true}
@@ -98,6 +102,8 @@ counts are unknown, not zero.
 literal (`impl From<Telemetry> for UsageEvent`). A field added on
 either side therefore becomes a compile error instead of silent drift.
 `received_at` is stamped by the control plane.
+`virtual_key_id` is nullable for legacy requests and contains only the
+non-secret key ID for virtual-key requests.
 
 ## Compatibility rules
 

@@ -10,4 +10,4 @@ level of modules, data structures, and algorithms.
 | [daemon.md](./daemon.md) | CLI, control channel, inference pipeline, usage accounting | `daemon/src/` |
 | [web.md](./web.md) | Dashboard components, polling, build and embedding | `web/` |
 | [configuration.md](./configuration.md) | Shared `config.toml`, daemon TOML, environment variables | `config-provider/`, `config.toml`, `daemon/config.example.toml` |
-| [virtual-keys.md](./virtual-keys.md) | Proposed virtual-key lifecycle, model access, and offline leases (not implemented) | `contract/virtual-keys.openapi.yaml`, `contract/virtual-key-control.schema.json` |
+| [virtual-keys.md](./virtual-keys.md) | Virtual-key lifecycle, model access, and offline leases | `contract/openapi.yaml`, `contract/virtual-key-control.schema.json` |

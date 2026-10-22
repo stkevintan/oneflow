@@ -128,6 +128,12 @@ impl MemoryStore {
         daemon.last_seen = now;
 
         match message {
+            DaemonMessage::VirtualKeyPolicyAck(ack) => {
+                if ack.protocol_version == 1 {
+                    daemon.auth_policy_revision = Some(ack.revision);
+                    daemon.auth_policy_valid_until = Some(ack.valid_until);
+                }
+            }
             DaemonMessage::Registration(reg) => {
                 info!(
                     daemon_id = %reg.daemon_id,
@@ -216,16 +222,19 @@ fn new_daemon(connection_id: &str, now: i64) -> Daemon {
         failed_requests: 0,
         total_prompt_tokens: 0,
         total_completion_tokens: 0,
+        auth_policy_revision: None,
+        auth_policy_valid_until: None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::Telemetry;
+    use protocol::{Telemetry, VirtualKeyPolicyAck};
 
     fn telemetry(daemon_id: &str, model_name: &str, request_id: &str) -> DaemonMessage {
         DaemonMessage::Telemetry(Telemetry {
+            virtual_key_id: None,
             daemon_id: daemon_id.to_string(),
             model_name: model_name.to_string(),
             prompt_tokens: 1,
@@ -345,5 +354,25 @@ mod tests {
             .await
             .items
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn virtual_key_policy_ack_is_exposed_on_daemon_status() {
+        let store = MemoryStore::new(default_config());
+        store.daemon_connected("conn", 1).await;
+        store
+            .apply_daemon_message(
+                "conn",
+                DaemonMessage::VirtualKeyPolicyAck(VirtualKeyPolicyAck {
+                    protocol_version: 1,
+                    revision: 42,
+                    valid_until: 345,
+                }),
+                2,
+            )
+            .await;
+        let daemon = store.daemon("conn").await.unwrap();
+        assert_eq!(daemon.auth_policy_revision, Some(42));
+        assert_eq!(daemon.auth_policy_valid_until, Some(345));
     }
 }

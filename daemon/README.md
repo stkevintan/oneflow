@@ -48,3 +48,17 @@ reconnecting states. Set `RUST_LOG=oneflowd=debug` for more detail.
 `MAX_UPSTREAM_RESPONSE_BYTES` override matching TOML values. CLI options
 override those environment variables. `CLUSTER_NAME` configures the cluster
 label.
+
+## Managed virtual keys
+
+Set `auth_mode = "virtual_keys"` in the daemon TOML (or pass
+`--auth-mode virtual_keys`) and set `ONEFLOW_DAEMON_TOKEN` to the daemon's
+control-channel credential. Do not set `DAEMON_API_KEYS` in this mode.
+Remote control connections require `wss://`; local development may use
+loopback `ws://`.
+
+The daemon rejects protected requests until it receives a valid policy snapshot.
+Policies grant exact model aliases and expire after at most five minutes
+without a refresh, including while disconnected. Upstream credentials remain
+separate from virtual keys; client virtual keys are never forwarded upstream.
+See [deployment and API examples](../docs/virtual-keys.md).

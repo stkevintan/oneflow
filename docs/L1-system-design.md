@@ -3,6 +3,12 @@
 This level breaks the system into deployable units, the interfaces between
 them, and the main runtime flows.
 
+The diagrams and PoC limitations below describe legacy mode unless noted.
+[Virtual-key mode](./virtual-keys.md) additionally stores desired models and
+keys in PostgreSQL, authenticates management/control connections, and fences
+inference with leased model permissions. Presence and usage are still local
+to each control-plane instance.
+
 ## Containers
 
 ```mermaid
@@ -146,7 +152,7 @@ plane URL must be a WebSocket URL reachable from the daemon host, for example
 
 | Attribute | How it is addressed today |
 | --- | --- |
-| Availability of inference | Independent of the control plane; daemons keep the last config. |
+| Availability of inference | Legacy mode keeps the last config; virtual-key mode requires an unexpired policy lease. |
 | Network resilience | Outbound WebSocket, reconnect every 5 s, current config re-sent on every connect. |
 | Accuracy of usage | Provider-reported usage only; missing usage is flagged `usage_reported: false`, not recorded as zero. |
 | Bounded resources | Telemetry queue (256), usage history (200), usage page size (≤ 200), unary body cap, SSE scan buffer cap, upstream timeouts. |
@@ -163,8 +169,8 @@ where it is going.
 | --- | --- | --- |
 | Dashboard | ✅ Separate client; the control plane serves no HTML | Same |
 | Clients | Web only (any client can use `/v1`) | Web, CLI, TUI, desktop, all equal |
-| API surface | ✅ `/v1/*`, CORS allow-list; bearer auth declared but not enforced | `/v1/*`, bearer tokens enforced |
-| Desired config | Memory; resets on restart | PostgreSQL `config_versions` (append-only) |
+| API surface | `/v1/*`, CORS allow-list; administrator and daemon authentication in virtual-key mode | Authenticated management/control deployment |
+| Desired config | Memory in legacy mode; PostgreSQL in virtual-key mode | PostgreSQL `config_versions` (append-only) |
 | Daemon registry | In-memory `BTreeMap` | PostgreSQL `daemon_sessions`, lease on `last_seen` |
 | Usage events | In-memory history of 200, paged via `/v1/usage/events` | PostgreSQL `usage_events`, optional OTLP export |
 | Fan-out | In-process `tokio::broadcast` | Postgres `LISTEN`/`NOTIFY` → per-instance broadcast |
@@ -208,10 +214,10 @@ resync rules, presence lease, and schema are in the ADR.
 Items marked ✱ are addressed by
 [ADR 0001](./adr/0001-api-only-stateless-control-plane.md).
 
-- ✱ **No persistence.** The control plane keeps config, daemons, and telemetry in
-  memory; a restart reverts to the built-in default config.
-- ✱ **No authentication** on `/control` or `/v1/*` (declared in the contract, not enforced). Anyone who can reach the
-  control plane can register as a daemon or push configuration.
+- ✱ **Partial persistence.** Legacy mode keeps everything in memory; virtual-key
+  mode persists model configuration and keys, but not presence or usage.
+- ✱ **Legacy mode has no authentication** on `/control` or `/v1/*`. Virtual-key
+  mode authenticates management administrators and bound daemon identities.
 - **Plaintext secrets in config.** `parameters.api_key` is stored, returned by
   `GET /v1/config`, and broadcast in clear text. Prefer `api_key_env`, which keeps
   the secret on the daemon host.

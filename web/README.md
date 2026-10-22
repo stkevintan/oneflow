@@ -88,5 +88,8 @@ VITE_CONTROL_PLANE_URL=https://cp.example npm run build
 cors_allowed_origins = ["https://dashboard.example"]
 ```
 
-The contract declares bearer auth, but the control plane does not enforce it yet
-and the dashboard sends no token.
+In virtual-key mode, enter the management credential in the dashboard's
+**Administrator token** form. It is sent as a bearer token, kept only in
+memory, and cleared on page reload. Never bake it into the Vite bundle.
+Legacy mode does not require it. See
+[virtual-key deployment](../docs/virtual-keys.md).

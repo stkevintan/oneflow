@@ -11,6 +11,14 @@ serves no UI; dashboards, CLIs, and other clients are deployed separately (see
 | `control-plane/src/api.rs` | `create_app`: `/v1` router, handlers, validation, CORS, JSON errors, `contract_tests` |
 | `control-plane/src/control.rs` | `/control` WebSocket handler and per-daemon connection loop |
 | `control-plane/src/store.rs` | `MemoryStore`: desired config, daemon sessions, usage history |
+| `control-plane/src/virtual_keys.rs` | Opt-in PostgreSQL model/key storage, policy snapshots, and management/control authentication |
+| `control-plane/src/key_api.rs` | LiteLLM-style key-management request mapping and response shapes |
+
+With virtual-key mode enabled, desired models and keys are stored in PostgreSQL,
+not `MemoryStore`. Management routes require the administrator token (except
+liveness), and control connections authenticate a bound daemon identity.
+Presence and recent usage remain process-local. See
+[deployment](../virtual-keys.md) and [virtual-key design](./virtual-keys.md).
 
 ## Startup
 
@@ -36,6 +44,10 @@ serves no UI; dashboards, CLIs, and other clients are deployed separately (see
 | GET | `/v1/daemons` | `list_daemons` | `DaemonList { items }`, ordered by `connection_id`. |
 | GET | `/v1/daemons/{connection_id}` | `get_daemon` | One `Daemon`, or JSON 404. |
 | GET | `/v1/usage/events` | `list_usage_events` | `UsageEventPage`, newest first (see below). |
+| POST | `/key/generate` | Virtual-key management | LiteLLM-style creation; one-time `key`, `models`, `key_alias`, optional `duration`. |
+| GET | `/key/list` | Virtual-key management | Page/size pagination; hashes or full metadata, excluding deleted keys. |
+| GET | `/key/info` | Virtual-key management | Metadata lookup by `key` hash (preferred) or plaintext. |
+| POST | `/key/delete` | Virtual-key management | Atomic permanent deletion from active use; accepts a `keys` array. |
 | GET | `/control` | `control::ws_handler` | WebSocket upgrade; see [Daemon connection lifecycle](#daemon-connection-lifecycle). |
 | any | unmatched path | `not_found` | JSON 404 `{ error }`. `/` and the old `/api/*` paths also land here. |
 | other | matched path, wrong method | `method_not_allowed` | JSON 405 `{ error }`. |
@@ -71,7 +83,7 @@ event exists.
 ### CORS
 
 When `cors_allowed_origins` is non-empty, a `tower-http` `CorsLayer` allows
-those exact origins, methods `GET`/`PUT`, and headers `Authorization` and
+those exact origins, methods `GET`/`PUT`/`POST`, and headers `Authorization` and
 `Content-Type`. When it is empty (the default) no CORS headers are sent; the
 web dev and preview servers proxy `/v1`, so the browser sees one origin.
 

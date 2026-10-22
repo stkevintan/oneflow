@@ -121,10 +121,148 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/key/generate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Generate a key (LiteLLM-style supported subset)
+         * @description Commits the key and policy revision durably before responding.
+         *     A successful response does not mean every daemon has applied the policy.
+         *     The plaintext secret is not retained and cannot be recovered.
+         *     A lost response requires creating a replacement and revoking the old key;
+         *     automatic retries may create additional keys.
+         */
+        post: operations["generateKey"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/key/list": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List non-deleted keys with LiteLLM-style pagination */
+        get: operations["listKeys"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/key/info": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get metadata using a key hash (preferred) or raw key
+         * @description Requires an administrator token. Supply SHA-256 rather than a raw key
+         *     to keep bearer secrets out of URL/access logs. The response always
+         *     normalizes key to the hash and never echoes the raw secret.
+         */
+        get: operations["keyInfo"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/key/delete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Delete keys from active use
+         * @description Accepts plaintext keys or SHA-256 hashes; hashes are preferred.
+         *     Atomically revokes all requested keys. Unknown identifiers return 404
+         *     without deleting any key. Repeated deletion is idempotent. Metadata is
+         *     retained for audit/info, but deleted keys are absent from key/list.
+         *     Existing leases and admitted requests follow the bounded revocation rules.
+         */
+        post: operations["deleteKeys"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * @description LiteLLM-style subset. Explicit non-empty models are required; unlike
+         *     LiteLLM, empty/omitted models do NOT grant all-model access. Unsupported
+         *     fields (budgets, rate limits, metadata, user/team IDs) return 400.
+         */
+        GenerateKeyRequest: {
+            /** @description Optional display label; generated when omitted or null. */
+            key_alias?: string | null;
+            models: string[];
+            /** @description Positive duration (for example 30d); omitted/null means no key expiry. */
+            duration?: string | null;
+        };
+        KeyMetadata: {
+            /** @description SHA-256 identifier, not a usable inference credential. */
+            token: string;
+            /** @description Oneflow internal key ID, also used in telemetry. */
+            token_id: string;
+            key_alias: string;
+            models: string[];
+            /** @description RFC 3339 UTC timestamp or null. */
+            expires: string | null;
+            /** @description RFC 3339 UTC timestamp. */
+            created_at: string;
+            /** @description True when permanently deleted/revoked. */
+            blocked: boolean;
+        };
+        GenerateKeyResponse: components["schemas"]["KeyMetadata"] & {
+            /** @description One-time plaintext key; starts with sk-. Never log it. */
+            key: string;
+        };
+        KeyInfoResponse: {
+            /** @description Normalized SHA-256 key hash, including when lookup used plaintext. */
+            key: string;
+            info: components["schemas"]["KeyMetadata"];
+        };
+        KeyListResponse: {
+            keys: (string | components["schemas"]["KeyMetadata"])[];
+            /** Format: int64 */
+            total_count: number;
+            /** Format: int64 */
+            current_page: number;
+            /** Format: int64 */
+            total_pages: number;
+        };
+        DeleteKeysRequest: {
+            keys: string[];
+        };
+        DeleteKeysResponse: {
+            /** @description Hashes only; plaintext inputs are never echoed. */
+            deleted_keys: string[];
+        };
         HealthResponse: {
             /** @description Always `ok` when the service responds. */
             status: string;
@@ -198,6 +336,16 @@ export interface components {
             total_prompt_tokens: number;
             /** Format: int64 */
             total_completion_tokens: number;
+            /**
+             * Format: int64
+             * @description Last acknowledged virtual-key policy revision.
+             */
+            auth_policy_revision: number | null;
+            /**
+             * Format: int64
+             * @description Last acknowledged policy lease deadline, in Unix seconds.
+             */
+            auth_policy_valid_until: number | null;
         };
         UsageEventPage: {
             /** @description Newest first. */
@@ -229,6 +377,8 @@ export interface components {
             latency_ms: number;
             /** @description Whether the client requested a streaming response. */
             streamed: boolean;
+            /** @description Non-secret virtual key ID; null for legacy inference. */
+            virtual_key_id: string | null;
             /**
              * Format: int64
              * @description Unix timestamp in seconds, stamped by the control plane on arrival.
@@ -261,6 +411,24 @@ export interface components {
         };
         /** @description The resource does not exist */
         NotFound: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description Authenticated caller is not a management administrator */
+        Forbidden: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description Durable key storage is unavailable */
+        Unavailable: {
             headers: {
                 [name: string]: unknown;
             };
@@ -439,6 +607,119 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+        };
+    };
+    generateKey: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GenerateKeyRequest"];
+            };
+        };
+        responses: {
+            /** @description Created; the only response containing the plaintext key */
+            200: {
+                headers: {
+                    "Cache-Control"?: "no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GenerateKeyResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listKeys: {
+        parameters: {
+            query?: {
+                page?: number;
+                size?: number;
+                return_full_object?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Hash identifiers by default; metadata objects when return_full_object=true */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KeyListResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    keyInfo: {
+        parameters: {
+            query: {
+                key: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Key metadata */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KeyInfoResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    deleteKeys: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeleteKeysRequest"];
+            };
+        };
+        responses: {
+            /** @description Deleted identifiers normalized to hashes (never raw secrets) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeleteKeysResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["Unavailable"];
         };
     };
 }

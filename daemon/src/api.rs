@@ -5,12 +5,12 @@ use std::time::Instant;
 
 use axum::{
     body::Body,
-    extract::{Path, Request, State},
+    extract::{rejection::JsonRejection, Path, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 use futures_util::StreamExt;
 use protocol::ModelConfig;
@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 use tracing::warn;
 use uuid::Uuid;
 
+use crate::auth::{AuthFailure, AuthMode, Principal};
 use crate::upstream::{
     self, apply_model_parameters, chat_completions_endpoint, configured_api_key,
     enable_stream_usage, RequestContext, TelemetryGuard, Usage,
@@ -43,7 +44,48 @@ pub(crate) fn create_app(state: AppState) -> Router {
 /// Rejects unauthenticated `/v1/*` calls when `DAEMON_API_KEYS` is configured.
 /// This is deliberately local and temporary: Phase 2 replaces it with
 /// control-plane-issued virtual keys.
-async fn require_api_key(State(state): State<AppState>, request: Request, next: Next) -> Response {
+async fn require_api_key(
+    State(state): State<AppState>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    if state.settings.auth_mode == AuthMode::VirtualKeys {
+        let token = request
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "));
+        let principal = match token {
+            Some(token) => state.policies.read().await.authenticate(
+                token,
+                now_ts(),
+                tokio::time::Instant::now(),
+            ),
+            None => Err(AuthFailure::InvalidKey),
+        };
+        match principal {
+            Ok(principal) => {
+                request.extensions_mut().insert(principal);
+                return next.run(request).await;
+            }
+            Err(failure) => {
+                let (status, code, message) = match failure {
+                    AuthFailure::InvalidKey => (
+                        StatusCode::UNAUTHORIZED,
+                        "invalid_api_key",
+                        "missing or invalid API key",
+                    ),
+                    AuthFailure::Unavailable => (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "auth_policy_unavailable",
+                        "authorization policy is unavailable",
+                    ),
+                };
+                warn!(%status, code, "inference authentication rejected");
+                return auth_error(status, code, message, None);
+            }
+        }
+    }
     if state.settings.api_keys.is_empty() {
         return next.run(request).await;
     }
@@ -76,16 +118,8 @@ async fn require_api_key(State(state): State<AppState>, request: Request, next: 
 }
 
 fn constant_time_eq(expected: &str, provided: &str) -> bool {
-    let expected = expected.as_bytes();
-    let provided = provided.as_bytes();
-    if expected.len() != provided.len() {
-        return false;
-    }
-    expected
-        .iter()
-        .zip(provided)
-        .fold(0u8, |acc, (left, right)| acc | (left ^ right))
-        == 0
+    use subtle::ConstantTimeEq;
+    bool::from(expected.as_bytes().ct_eq(provided.as_bytes()))
 }
 
 async fn healthz(State(state): State<AppState>) -> Json<Value> {
@@ -99,13 +133,21 @@ async fn healthz(State(state): State<AppState>) -> Json<Value> {
     }))
 }
 
-async fn list_models(State(state): State<AppState>) -> Json<Value> {
+async fn list_models(
+    State(state): State<AppState>,
+    principal: Option<Extension<Principal>>,
+) -> Json<Value> {
     let created = state.models_updated_at.load(Ordering::Relaxed);
     let mut data: Vec<Value> = state
         .models
         .read()
         .await
         .values()
+        .filter(|model| {
+            principal
+                .as_ref()
+                .is_none_or(|Extension(key)| key.allows(&model.model_name))
+        })
         .map(|model| model_json(model, created))
         .collect();
     data.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
@@ -113,15 +155,27 @@ async fn list_models(State(state): State<AppState>) -> Json<Value> {
     Json(json!({ "object": "list", "data": data }))
 }
 
-async fn get_model(State(state): State<AppState>, Path(model_name): Path<String>) -> Response {
+async fn get_model(
+    State(state): State<AppState>,
+    Path(model_name): Path<String>,
+    principal: Option<Extension<Principal>>,
+) -> Response {
+    if principal
+        .as_ref()
+        .is_some_and(|Extension(key)| !key.allows(&model_name))
+    {
+        return model_forbidden();
+    }
     match state.model(&model_name).await {
         Some(model) => {
             let created = state.models_updated_at.load(Ordering::Relaxed);
             Json(model_json(&model, created)).into_response()
         }
-        None => openai_error(
+        None => auth_error(
             StatusCode::NOT_FOUND,
+            "model_not_found",
             format!("model '{model_name}' is not configured"),
+            Some("model"),
         ),
     }
 }
@@ -138,19 +192,46 @@ fn model_json(model: &ModelConfig, created: i64) -> Value {
 async fn chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(mut payload): Json<Value>,
+    principal: Option<Extension<Principal>>,
+    payload: Result<Json<Value>, JsonRejection>,
 ) -> Response {
+    let mut payload = match payload {
+        Ok(Json(value)) => value,
+        Err(_) => {
+            return auth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "invalid JSON body",
+                None,
+            )
+        }
+    };
     let requested_model = match payload.get("model").and_then(Value::as_str) {
-        Some(model) if !model.is_empty() => model.to_string(),
-        _ => return openai_error(StatusCode::BAD_REQUEST, "the model field is required"),
+        Some(model) if !model.trim().is_empty() => model.to_string(),
+        _ => {
+            return auth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "the model field is required",
+                Some("model"),
+            )
+        }
     };
 
+    if principal
+        .as_ref()
+        .is_some_and(|Extension(key)| !key.allows(&requested_model))
+    {
+        return model_forbidden();
+    }
     let model = match state.model(&requested_model).await {
         Some(model) => model,
         None => {
-            return openai_error(
+            return auth_error(
                 StatusCode::NOT_FOUND,
+                "model_not_found",
                 format!("model '{requested_model}' is not configured"),
+                Some("model"),
             )
         }
     };
@@ -171,6 +252,7 @@ async fn chat_completions(
     let _active_request = ActiveRequestGuard::new(state.active_requests.clone());
 
     let mut context = RequestContext {
+        virtual_key_id: principal.as_ref().map(|Extension(key)| key.key_id.clone()),
         daemon_id: state.settings.daemon_id.clone(),
         model_name: requested_model.clone(),
         request_id: request_id.clone(),
@@ -180,10 +262,31 @@ async fn chat_completions(
     };
 
     let mut request = state.client.post(endpoint).json(&payload);
-    if let Some(api_key) = configured_api_key(&model.parameters) {
+    let provider_key = if state.settings.auth_mode == AuthMode::VirtualKeys {
+        match model.parameters.get("api_key_env") {
+            Some(name) => match std::env::var(name) {
+                Ok(key) if !key.trim().is_empty() => Some(key),
+                _ => {
+                    warn!(model = %requested_model, "configured upstream credential is unavailable");
+                    return auth_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "upstream_auth_unavailable",
+                        "upstream credential is unavailable",
+                        None,
+                    );
+                }
+            },
+            None => model.parameters.get("api_key").cloned(),
+        }
+    } else {
+        configured_api_key(&model.parameters)
+    };
+    if let Some(api_key) = provider_key {
         request = request.bearer_auth(api_key);
-    } else if let Some(authorization) = headers.get(header::AUTHORIZATION) {
-        request = request.header(header::AUTHORIZATION, authorization.clone());
+    } else if state.settings.auth_mode == AuthMode::Legacy {
+        if let Some(authorization) = headers.get(header::AUTHORIZATION) {
+            request = request.header(header::AUTHORIZATION, authorization.clone());
+        }
     }
     if !streamed {
         // Streaming responses are bounded by the client read timeout instead.
@@ -273,6 +376,46 @@ async fn read_capped(response: reqwest::Response, limit: usize) -> Result<Vec<u8
     Ok(body)
 }
 
+fn model_forbidden() -> Response {
+    warn!(
+        code = "model_not_allowed",
+        "inference authorization rejected"
+    );
+    auth_error(
+        StatusCode::FORBIDDEN,
+        "model_not_allowed",
+        "the virtual key cannot access this model",
+        Some("model"),
+    )
+}
+
+fn auth_error(
+    status: StatusCode,
+    code: &str,
+    message: impl Into<String>,
+    param: Option<&str>,
+) -> Response {
+    let error_type = match status {
+        StatusCode::UNAUTHORIZED => "authentication_error",
+        StatusCode::FORBIDDEN => "permission_error",
+        StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND => "invalid_request_error",
+        _ => "server_error",
+    };
+    let mut response = (
+        status,
+        Json(json!({"error": {
+            "message": message.into(), "type": error_type, "param": param, "code": code
+        }})),
+    )
+        .into_response();
+    if status == StatusCode::UNAUTHORIZED {
+        response
+            .headers_mut()
+            .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+    }
+    response
+}
+
 fn internal_error(message: &str) -> Response {
     openai_error(StatusCode::INTERNAL_SERVER_ERROR, message)
 }
@@ -308,6 +451,8 @@ mod tests {
 
     fn settings(api_keys: Vec<String>, request_timeout: Duration) -> DaemonSettings {
         DaemonSettings {
+            control_token: None,
+            auth_mode: AuthMode::Legacy,
             daemon_id: "test-daemon".to_string(),
             api_keys,
             connect_timeout: Duration::from_secs(2),
@@ -381,6 +526,249 @@ mod tests {
             DaemonMessage::Telemetry(telemetry) => telemetry,
             other => panic!("expected telemetry, got {other:?}"),
         }
+    }
+
+    fn virtual_token() -> String {
+        format!("sk-{}_{}", "a".repeat(32), "b".repeat(64))
+    }
+
+    async fn virtual_harness(
+        upstream: Router,
+    ) -> (AppState, Router, mpsc::Receiver<DaemonMessage>) {
+        let base = spawn(upstream).await;
+        let mut settings = settings(Vec::new(), Duration::from_secs(5));
+        settings.auth_mode = AuthMode::VirtualKeys;
+        let (tx, rx) = mpsc::channel(16);
+        let state = AppState::new(settings, tx).unwrap();
+        state
+            .set_models(vec![
+                ModelConfig {
+                    model_name: UPSTREAM_MODEL.into(),
+                    provider: "custom_openai".into(),
+                    api_base: format!("{base}/v1"),
+                    parameters: ModelConfigParameters::new(),
+                },
+                ModelConfig {
+                    model_name: "restricted".into(),
+                    provider: "custom_openai".into(),
+                    api_base: format!("{base}/v1"),
+                    parameters: ModelConfigParameters::new(),
+                },
+            ])
+            .await;
+        let app = create_app(state.clone());
+        (state, app, rx)
+    }
+
+    async fn grant(state: &AppState, revision: i64, keys: bool) {
+        use sha2::{Digest, Sha256};
+        let snapshot = protocol::VirtualKeyPolicySnapshot {
+            protocol_version: 1,
+            revision,
+            issued_at: now_ts(),
+            valid_until: now_ts() + 300,
+            keys: if keys {
+                vec![protocol::VirtualKeyPolicy {
+                    key_id: "a".repeat(32),
+                    token_sha256: format!("{:x}", Sha256::digest(virtual_token().as_bytes())),
+                    allowed_models: vec![UPSTREAM_MODEL.into(), "removed".into()],
+                    expires_at: None,
+                }]
+            } else {
+                vec![]
+            },
+        };
+        state
+            .policies
+            .write()
+            .await
+            .apply(snapshot, now_ts(), tokio::time::Instant::now())
+            .unwrap();
+    }
+
+    async fn virtual_call(app: Router, method: &str, path: &str, body: Value) -> Response {
+        app.oneshot(
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header("authorization", format!("Bearer {}", virtual_token()))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn virtual_keys_fail_closed_filter_models_and_enforce_revocation() {
+        let (state, app, mut rx) = virtual_harness(Router::new()).await;
+        let unavailable = virtual_call(app.clone(), "GET", "/v1/models", Value::Null).await;
+        assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let missing = call(app.clone(), json!({"model": UPSTREAM_MODEL})).await;
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(missing.headers()["www-authenticate"], "Bearer");
+        grant(&state, 1, true).await;
+        let list = virtual_call(app.clone(), "GET", "/v1/models", Value::Null).await;
+        assert_eq!(list.status(), StatusCode::OK);
+        let value: Value =
+            serde_json::from_slice(&to_bytes(list.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(value["data"].as_array().unwrap().len(), 1);
+        assert_eq!(value["data"][0]["id"], UPSTREAM_MODEL);
+        for (method, path, payload, status) in [
+            (
+                "GET",
+                "/v1/models/restricted",
+                Value::Null,
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                "POST",
+                "/v1/chat/completions",
+                json!({"model":"restricted"}),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                "GET",
+                "/v1/models/removed",
+                Value::Null,
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "POST",
+                "/v1/chat/completions",
+                json!({}),
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            assert_eq!(
+                virtual_call(app.clone(), method, path, payload)
+                    .await
+                    .status(),
+                status
+            );
+        }
+        grant(&state, 2, false).await;
+        assert_eq!(
+            virtual_call(app, "GET", "/v1/models", Value::Null)
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "admission failures must not produce upstream usage"
+        );
+    }
+
+    #[tokio::test]
+    async fn virtual_key_never_reaches_upstream_and_usage_has_key_id() {
+        let upstream = Router::new().route(
+            "/v1/chat/completions",
+            post(
+                |headers: HeaderMap, Json(payload): Json<Value>| async move {
+                    assert!(headers.get(header::AUTHORIZATION).is_none());
+                    assert_eq!(payload["model"], "real-provider-model");
+                    Json(json!({"usage":{"prompt_tokens":1,"completion_tokens":2}}))
+                },
+            ),
+        );
+        let (state, app, mut rx) = virtual_harness(upstream).await;
+        state
+            .models
+            .write()
+            .await
+            .get_mut(UPSTREAM_MODEL)
+            .unwrap()
+            .parameters
+            .insert("upstream_model", "real-provider-model");
+        grant(&state, 1, true).await;
+        let response = virtual_call(
+            app,
+            "POST",
+            "/v1/chat/completions",
+            json!({"model":UPSTREAM_MODEL}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let event = next_telemetry(&mut rx).await;
+        assert_eq!(
+            event.virtual_key_id.as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+    }
+
+    #[tokio::test]
+    async fn virtual_mode_does_not_fall_back_when_provider_env_is_missing() {
+        let (state, app, mut rx) = virtual_harness(Router::new()).await;
+        {
+            let mut models = state.models.write().await;
+            let model = models.get_mut(UPSTREAM_MODEL).unwrap();
+            model
+                .parameters
+                .insert("api_key_env", "ONEFLOW_TEST_MISSING_PROVIDER_CREDENTIAL");
+            model.parameters.insert("api_key", "must-not-fallback");
+        }
+        grant(&state, 1, true).await;
+        let response = virtual_call(
+            app,
+            "POST",
+            "/v1/chat/completions",
+            json!({"model":UPSTREAM_MODEL}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["error"]["code"], "upstream_auth_unavailable");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn virtual_stream_uses_provider_key_and_survives_later_revocation() {
+        let upstream = Router::new().route(
+            "/v1/chat/completions",
+            post(|headers: HeaderMap, Json(payload): Json<Value>| async move {
+                assert_eq!(headers[header::AUTHORIZATION], "Bearer provider-test-token");
+                assert_eq!(payload["stream_options"]["include_usage"], true);
+                Response::builder()
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from("data: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4}}\n\ndata: [DONE]\n\n"))
+                    .unwrap()
+            }),
+        );
+        let (state, app, mut rx) = virtual_harness(upstream).await;
+        state
+            .models
+            .write()
+            .await
+            .get_mut(UPSTREAM_MODEL)
+            .unwrap()
+            .parameters
+            .insert("api_key", "provider-test-token");
+        grant(&state, 1, true).await;
+        let response = virtual_call(
+            app.clone(),
+            "POST",
+            "/v1/chat/completions",
+            json!({"model":UPSTREAM_MODEL,"stream":true}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        grant(&state, 2, false).await;
+        assert_eq!(
+            virtual_call(app, "GET", "/v1/models", Value::Null)
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(std::str::from_utf8(&body).unwrap().contains("[DONE]"));
+        let event = next_telemetry(&mut rx).await;
+        assert!(event.streamed && event.success);
+        assert_eq!(event.completion_tokens, 4);
+        assert!(event.virtual_key_id.is_some());
     }
 
     #[tokio::test]
