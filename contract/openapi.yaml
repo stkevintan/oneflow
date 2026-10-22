@@ -26,8 +26,8 @@ info:
         gain pagination fields without breaking clients.
 
     Authentication: operations require `Authorization: Bearer <token>` unless
-    they declare `security: []`. Authentication is enforced when virtual-key storage is configured;
-    legacy mode retains the unauthenticated proof-of-concept API.
+    they declare `security: []`. PostgreSQL storage and administrator authentication
+    are required. Daemon control connections require provisioned daemon credentials.
 
     Out of scope: the daemon WebSocket control channel (`/control`) is a
     transport endpoint, not a JSON resource; its messages are defined in
@@ -125,7 +125,7 @@ paths:
       operationId: createDaemon
       summary: Provision a daemon credential
       description: |
-        Requires PostgreSQL-backed mode and administrator authentication.
+        Requires administrator authentication.
         The caller chooses a unique daemon ID. Returns a random token once;
         only its SHA-256 hash is stored. Duplicate IDs return 409, including
         revoked IDs. Rotate a credential if its creation response is lost.
@@ -175,7 +175,7 @@ paths:
       operationId: listDaemonCredentials
       summary: List provisioned daemons, including offline and revoked credentials
       description: |
-        Administrator-only in PostgreSQL-backed mode; otherwise 503.
+        Administrator-only. Database failures return 503.
         Metadata only: no token or token hash is returned. Connection presence
         remains available separately at GET /v1/daemons and is process-local.
         Responses use Cache-Control no-store.
@@ -644,13 +644,19 @@ components:
           format: int64
     IssuedDaemonCredential:
       type: object
-      required: [credential, token]
+      required: [credential, token, config_toml]
       properties:
         credential:
           $ref: "#/components/schemas/DaemonCredential"
         token:
           type: string
           description: One-time plaintext control-channel token. Never log it.
+        config_toml:
+          type: string
+          description: |
+            One-time standalone daemon configuration, ready to save as config.toml.
+            Includes cp from control_plane.websocket_url, daemon_id, control_token,
+            and a loopback listener. Contains the bearer secret; never log it.
     DaemonCredentialList:
       type: object
       required: [items]
@@ -877,8 +883,8 @@ components:
           type: boolean
           description: Whether the client requested a streaming response.
         virtual_key_id:
-          type: [string, "null"]
-          description: Non-secret virtual key ID; null for legacy inference.
+          type: string
+          description: Non-secret virtual key ID used to authorize the request.
         received_at:
           type: integer
           format: int64

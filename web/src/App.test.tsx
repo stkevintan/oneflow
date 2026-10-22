@@ -39,7 +39,7 @@ const USAGE: UsageEventPage = {
   items: [
     {
       request_id: "req-2",
-      virtual_key_id: null,
+      virtual_key_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       daemon_id: "daemon-poc-001",
       model_name: "demo-model",
       prompt_tokens: 0,
@@ -53,7 +53,7 @@ const USAGE: UsageEventPage = {
     },
     {
       request_id: "req-1",
-      virtual_key_id: null,
+      virtual_key_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       daemon_id: "daemon-poc-001",
       model_name: "demo-model",
       prompt_tokens: 12,

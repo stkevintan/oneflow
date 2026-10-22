@@ -133,8 +133,7 @@ pub struct Heartbeat {
 /// provider. The control plane stores these as [`UsageEvent`]s.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Telemetry {
-    #[serde(default)]
-    pub virtual_key_id: Option<String>,
+    pub virtual_key_id: String,
     pub daemon_id: String,
     pub model_name: String,
     pub prompt_tokens: u32,
@@ -211,16 +210,17 @@ mod virtual_key_tests {
     }
 
     #[test]
-    fn legacy_telemetry_defaults_key_id_to_null() {
-        let telemetry: Telemetry = serde_json::from_value(serde_json::json!({
-            "daemon_id": "legacy", "model_name": "alias", "prompt_tokens": 0,
+    fn telemetry_requires_virtual_key_attribution() {
+        let mut value = serde_json::json!({
+            "daemon_id": "daemon", "model_name": "alias", "prompt_tokens": 0,
             "completion_tokens": 0, "success": true, "request_id": "request",
             "latency_ms": 1, "status_code": 200, "streamed": false,
             "usage_reported": false
-        }))
-        .unwrap();
-        assert!(telemetry.virtual_key_id.is_none());
+        });
+        assert!(serde_json::from_value::<Telemetry>(value.clone()).is_err());
+        value["virtual_key_id"] = serde_json::json!("a".repeat(32));
+        let telemetry: Telemetry = serde_json::from_value(value).unwrap();
         let event = UsageEvent::from(telemetry);
-        assert!(serde_json::to_value(event).unwrap()["virtual_key_id"].is_null());
+        assert_eq!(event.virtual_key_id, "a".repeat(32));
     }
 }

@@ -3,8 +3,7 @@
 This level breaks the system into deployable units, the interfaces between
 them, and the main runtime flows.
 
-The diagrams and PoC limitations below describe legacy mode unless noted.
-[Virtual-key mode](./virtual-keys.md) additionally stores desired models and
+[Virtual-key authorization](./virtual-keys.md) stores desired models and
 keys in PostgreSQL, authenticates management/control connections, and fences
 inference with leased model permissions. Presence and usage are still local
 to each control-plane instance.
@@ -17,7 +16,8 @@ flowchart TB
         subgraph cpbin[control-plane binary]
             ws[/"WebSocket /control"/]
             api[/"Management API /v1/*"/]
-            state[(MemoryStore<br/>config, daemons, usage)]
+            state[(MemoryStore<br/>daemon presence, recent usage)]
+            db[(PostgreSQL<br/>models, keys, daemon credentials)]
             bus{{broadcast channel}}
         end
         cfg1[[config.toml]]
@@ -42,6 +42,7 @@ flowchart TB
     v1 --> provider[(Upstream provider)]
 
     api --> state
+    api --> db
     api --> bus
     ws --> state
     bus --> ws
@@ -67,7 +68,7 @@ built and deployed independently.
 | Interface | Direction | Transport | Defined in |
 | --- | --- | --- | --- |
 | Control channel `/control` | Daemon opens the connection; messages flow both ways | WebSocket, JSON text frames tagged by `type` | `protocol/src/lib.rs` |
-| Management API `/v1/*` (health, status, config, daemons, usage events) | Clients → control plane | HTTP/JSON; bearer auth declared, not yet enforced | `contract/openapi.yaml` |
+| Management API `/v1/*` and `/key/*` | Clients → control plane | HTTP/JSON; administrator bearer auth (health exempt) | `contract/openapi.yaml` |
 | Inference API `/v1/*`, `/healthz` | Client → daemon | HTTP/JSON, SSE for streams | OpenAI API shape; `daemon/src/api.rs` |
 | Upstream | Daemon → provider | HTTP(S), OpenAI chat completions | `daemon/src/upstream.rs` |
 
@@ -79,10 +80,11 @@ built and deployed independently.
 sequenceDiagram
     participant D as Daemon
     participant CP as Control plane
-    D->>CP: WebSocket upgrade /control
+    D->>CP: WebSocket upgrade /control (daemon ID + credential)
     CP->>CP: create Daemon record (connection_id)
-    CP-->>D: ConfigUpdate (current desired config)
     D->>CP: Registration (daemon_id, cluster, version, hostname)
+    CP->>CP: validate bound identity and policy capability
+    CP-->>D: ConfigUpdate + leased key policy snapshot
     D->>D: apply ConfigUpdate (replace model table)
     loop every 5 s
         D->>CP: Heartbeat (active_requests, loaded_models)
@@ -90,8 +92,7 @@ sequenceDiagram
     Note over D,CP: On disconnect the record is removed;<br/>the daemon retries every 5 s.
 ```
 
-The initial `ConfigUpdate` and the `Registration` are sent concurrently by the
-two sides, so their relative order is not significant.
+Configuration and policy are sent only after authenticated registration.
 
 ### Configuration push
 
@@ -129,7 +130,8 @@ sequenceDiagram
 ```
 
 The control plane is not on the inference path. If it is unavailable, daemons
-keep serving with their last applied configuration. Telemetry queues in the
+keep serving only while their last applied policy lease remains valid (at most
+300 seconds plus clock skew). Telemetry queues in the
 daemon (capacity 256) until the channel reconnects; events beyond that are
 dropped and counted in `/healthz`.
 
@@ -146,13 +148,13 @@ and any number of clients (the web dashboard, served locally or from a static
 host). Under [ADR 0001](./adr/0001-api-only-stateless-control-plane.md) the
 single control plane becomes N instances plus PostgreSQL. The daemon's control
 plane URL must be a WebSocket URL reachable from the daemon host, for example
-`ws://control-plane.example:4000/control`.
+`wss://control-plane.example/control`.
 
 ## Quality attributes
 
 | Attribute | How it is addressed today |
 | --- | --- |
-| Availability of inference | Legacy mode keeps the last config; virtual-key mode requires an unexpired policy lease. |
+| Availability of inference | Requires an unexpired policy lease; fails closed at startup or expiry. |
 | Network resilience | Outbound WebSocket, reconnect every 5 s, current config re-sent on every connect. |
 | Accuracy of usage | Provider-reported usage only; missing usage is flagged `usage_reported: false`, not recorded as zero. |
 | Bounded resources | Telemetry queue (256), usage history (200), usage page size (≤ 200), unary body cap, SSE scan buffer cap, upstream timeouts. |
@@ -169,8 +171,8 @@ where it is going.
 | --- | --- | --- |
 | Dashboard | ✅ Separate client; the control plane serves no HTML | Same |
 | Clients | Web only (any client can use `/v1`) | Web, CLI, TUI, desktop, all equal |
-| API surface | `/v1/*`, CORS allow-list; administrator and daemon authentication in virtual-key mode | Authenticated management/control deployment |
-| Desired config | Memory in legacy mode; PostgreSQL in virtual-key mode | PostgreSQL `config_versions` (append-only) |
+| API surface | `/v1/*`, `/key/*`, CORS allow-list; mandatory administrator and daemon authentication | Authenticated management/control deployment |
+| Desired config | PostgreSQL | PostgreSQL `config_versions` (append-only) |
 | Daemon registry | In-memory `BTreeMap` | PostgreSQL `daemon_sessions`, lease on `last_seen` |
 | Usage events | In-memory history of 200, paged via `/v1/usage/events` | PostgreSQL `usage_events`, optional OTLP export |
 | Fan-out | In-process `tokio::broadcast` | Postgres `LISTEN`/`NOTIFY` → per-instance broadcast |
@@ -214,10 +216,8 @@ resync rules, presence lease, and schema are in the ADR.
 Items marked ✱ are addressed by
 [ADR 0001](./adr/0001-api-only-stateless-control-plane.md).
 
-- ✱ **Partial persistence.** Legacy mode keeps everything in memory; virtual-key
-  mode persists model configuration and keys, but not presence or usage.
-- ✱ **Legacy mode has no authentication** on `/control` or `/v1/*`. Virtual-key
-  mode authenticates management administrators and bound daemon identities.
+- ✱ **Partial persistence.** Model configuration, virtual keys, and daemon
+  credentials persist in PostgreSQL, but presence and usage do not.
 - **Plaintext secrets in config.** `parameters.api_key` is stored, returned by
   `GET /v1/config`, and broadcast in clear text. Prefer `api_key_env`, which keeps
   the secret on the daemon host.
@@ -225,8 +225,6 @@ Items marked ✱ are addressed by
 - ✱ **Lagging daemons can miss updates.** If a daemon falls behind the broadcast
   channel (capacity 32), skipped updates are logged but not re-sent until it
   reconnects.
-- **Daemon client auth is local.** `DAEMON_API_KEYS` is a stop-gap for
-  control-plane-issued virtual keys.
 - **Unencrypted control channel by default.** `wss://` works if the daemon is
   given a `wss://` URL and TLS is terminated in front of the control plane,
   but the control plane does not terminate TLS itself.

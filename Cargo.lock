@@ -348,10 +348,12 @@ dependencies = [
  "subtle",
  "tokio",
  "tokio-tungstenite",
+ "toml",
  "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 

@@ -8,16 +8,12 @@ serve OpenAI-compatible requests locally, and report usage and health telemetry.
 Inference traffic flows directly from each daemon to its configured model
 provider. It does not pass through the control plane.
 
-> **Legacy-mode proof of concept:** By default the control plane keeps
-> configuration, daemon presence, and usage history in memory, so this state
-> is lost when it restarts. Legacy mode does not enforce management
-> authentication. See [known gaps](docs/L1-system-design.md#known-gaps) and
-> [ADR 0001](docs/adr/0001-api-only-stateless-control-plane.md).
-
-For managed inference access, see [virtual-key deployment](docs/virtual-keys.md).
-This opt-in mode adds PostgreSQL-backed model configuration and key lifecycle,
-administrator authentication, authenticated daemon connections, and leased
-model allowlists. Legacy mode remains a proof of concept.
+PostgreSQL-backed model configuration and credential storage are required.
+Management requires an administrator token, daemon control connections require
+provisioned credentials, and inference requires virtual API keys with leased
+model permissions. There is no unauthenticated operating mode. Daemon presence
+and recent usage remain process-local and bounded.
+See [deployment](docs/virtual-keys.md).
 
 ## Architecture
 
@@ -40,20 +36,22 @@ Client app ──OpenAI-compatible HTTP──> Daemon ──HTTP(S)──> Model
 
 ## Quick start
 
-Requirements: Rust toolchain and Node.js/npm.
+Requirements: Rust toolchain, Node.js/npm, and PostgreSQL.
 
 1. Create your local configuration and start the control plane from the repository root:
 
    ```sh
    cp config.example.toml config.toml
+   chmod 600 config.toml
+   # Set database_url and a randomly generated admin_token before starting.
    cargo run -p control-plane
    ```
 
    By default it listens on `0.0.0.0:4000`. Your local `config.toml` is
    Git-ignored; only [`config.example.toml`](config.example.toml) is tracked.
-   Set `LLMCP_CONFIG` to select another file. Configure `database_url`,
-   and `admin_token` under `[control_plane]` to enable
-   PostgreSQL-backed virtual keys; see [deployment](docs/virtual-keys.md).
+   Set `LLMCP_CONFIG` to select another file. Both `database_url`
+   and `admin_token` under `[control_plane]` are required, with environment
+   overrides available; see [deployment](docs/virtual-keys.md).
 
 2. In another terminal, install dashboard dependencies and start the web app:
 
@@ -66,11 +64,11 @@ Requirements: Rust toolchain and Node.js/npm.
    Open the address printed by Vite (defaults to `http://127.0.0.1:5173`).
    The dev server proxies `/v1` and `/key` requests to the control plane.
 
-3. Configure a model in the dashboard. In virtual-key mode, use **Daemon
-   credentials** to create a daemon ID and save its one-time token. On the daemon
-   host, set `ONEFLOW_DAEMON_TOKEN`, and configure the matching `daemon_id` and
-   `auth_mode = "virtual_keys"`. Then start the daemon from the
-   repository root with its standalone example config:
+3. Apply your administrator token and configure a model in the dashboard. Use **Daemon
+   credentials** to create a daemon ID and **Download config.toml**. The download
+   includes the configured control-plane URL and generated token. Transfer it
+   securely to the daemon host, then run `oneflowd -c config.toml`.
+   Alternatively set `ONEFLOW_DAEMON_TOKEN` and use the standalone example:
 
    ```sh
    cargo run -p oneflowd -- --config daemon/config.example.toml

@@ -22,9 +22,10 @@ use store::{default_config, MemoryStore};
 use virtual_keys::VirtualKeyStore;
 
 #[derive(Clone)]
-pub(crate) struct VirtualKeyMode {
+pub(crate) struct AccessControl {
     pub(crate) store: Arc<VirtualKeyStore>,
     pub(crate) admin_token: Arc<String>,
+    pub(crate) control_plane_url: String,
 }
 
 #[derive(Clone)]
@@ -32,7 +33,7 @@ pub(crate) struct AppState {
     pub(crate) store: Arc<MemoryStore>,
     pub(crate) broadcast: broadcast::Sender<ControlMessage>,
     pub(crate) started_at: i64,
-    pub(crate) virtual_key_mode: Option<Arc<VirtualKeyMode>>,
+    pub(crate) access: Arc<AccessControl>,
 }
 
 pub(crate) fn now_ts() -> i64 {
@@ -70,21 +71,16 @@ async fn main() -> Result<()> {
 
     let (broadcast, _) = broadcast::channel(32);
     let fallback_config = default_config();
-    let virtual_key_mode = load_virtual_key_mode(&config.control_plane, &fallback_config).await?;
-    let initial_config = match &virtual_key_mode {
-        Some(mode) => mode.store.config().await?,
-        None => fallback_config,
-    };
+    let access = load_access_control(&config.control_plane, &fallback_config).await?;
+    let initial_config = access.store.config().await?;
     let state = AppState {
         store: Arc::new(MemoryStore::new(initial_config)),
         broadcast,
         started_at: now_ts(),
-        virtual_key_mode: virtual_key_mode.clone(),
+        access: access.clone(),
     };
 
-    if let Some(mode) = virtual_key_mode {
-        spawn_database_notifications(state.clone(), mode.store.clone());
-    }
+    spawn_database_notifications(state.clone(), access.store.clone());
 
     let app = api::create_app(state, cors_allowed_origins);
 
@@ -100,26 +96,41 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn load_virtual_key_mode(
+async fn load_access_control(
     config: &config_provider::ControlPlaneConfig,
     initial_config: &protocol::ModelConfigSet,
-) -> Result<Option<Arc<VirtualKeyMode>>> {
+) -> Result<Arc<AccessControl>> {
+    validate_control_plane_url(&config.websocket_url)?;
     if std::env::var_os("ONEFLOW_DAEMON_TOKENS").is_some() {
         anyhow::bail!("ONEFLOW_DAEMON_TOKENS is no longer supported; provision daemon credentials through POST /v1/daemons");
     }
-    let Some((database_url, admin_token)) = resolve_virtual_key_settings(
+    let (database_url, admin_token) = resolve_virtual_key_settings(
         config,
         optional_env("ONEFLOW_DATABASE_URL")?,
         optional_env("ONEFLOW_ADMIN_TOKEN")?,
-    )?
-    else {
-        return Ok(None);
-    };
+    )?;
     let key_store = Arc::new(VirtualKeyStore::connect(&database_url, initial_config).await?);
-    Ok(Some(Arc::new(VirtualKeyMode {
+    Ok(Arc::new(AccessControl {
         store: key_store,
         admin_token: Arc::new(admin_token),
-    })))
+        control_plane_url: config.websocket_url.clone(),
+    }))
+}
+
+fn validate_control_plane_url(value: &str) -> Result<()> {
+    let url = url::Url::parse(value).context("invalid control_plane.websocket_url")?;
+    anyhow::ensure!(
+        url.host_str().is_some()
+            && (url.scheme() == "wss"
+                || (url.scheme() == "ws" && url.host_str().is_some_and(|host| {
+                    host == "localhost" || host.trim_matches(['[', ']'])
+                        .parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+                })))
+            && url.username().is_empty() && url.password().is_none()
+            && url.query().is_none() && url.fragment().is_none(),
+        "control_plane.websocket_url must be a credential-free WSS URL (WS allowed only on loopback)"
+    );
+    Ok(())
 }
 
 type VirtualKeySettings = (String, String);
@@ -128,16 +139,13 @@ fn resolve_virtual_key_settings(
     config: &config_provider::ControlPlaneConfig,
     database_url: Option<String>,
     admin_token: Option<String>,
-) -> Result<Option<VirtualKeySettings>> {
+) -> Result<VirtualKeySettings> {
     let database_url = database_url.or_else(|| config.database_url.clone());
     let admin_token = admin_token.or_else(|| config.admin_token.clone());
     let configured = [database_url.is_some(), admin_token.is_some()];
-    if configured.iter().all(|value| !value) {
-        return Ok(None);
-    }
     if configured.iter().any(|value| !value) {
         anyhow::bail!(
-            "virtual-key mode requires control_plane.database_url and admin_token together (or ONEFLOW_DATABASE_URL and ONEFLOW_ADMIN_TOKEN overrides)"
+            "control_plane.database_url and admin_token are required (or ONEFLOW_DATABASE_URL and ONEFLOW_ADMIN_TOKEN overrides)"
         );
     }
 
@@ -149,10 +157,10 @@ fn resolve_virtual_key_settings(
     {
         anyhow::bail!("database_url must not be empty");
     }
-    Ok(Some((
+    Ok((
         database_url.expect("the setting was validated above"),
         admin_token,
-    )))
+    ))
 }
 
 fn optional_env(name: &str) -> Result<Option<String>> {
@@ -247,6 +255,27 @@ async fn refresh_policy_snapshot(state: &AppState, key_store: &VirtualKeyStore) 
 mod configuration_tests {
     use super::*;
 
+    #[test]
+    fn provisioning_url_is_secure_and_credential_free() {
+        for value in [
+            "wss://control.example/control",
+            "ws://127.0.0.1:4000/control",
+            "ws://[::1]/control",
+        ] {
+            assert!(validate_control_plane_url(value).is_ok(), "{value}");
+        }
+        for value in [
+            "",
+            "ws://remote.example/control",
+            "https://control.example/control",
+            "wss://user:password@control.example/control",
+            "wss://control.example/control?token=secret",
+            "wss://control.example/control#fragment",
+        ] {
+            assert!(validate_control_plane_url(value).is_err(), "{value}");
+        }
+    }
+
     fn config() -> config_provider::ControlPlaneConfig {
         config_provider::ControlPlaneConfig {
             bind_addr: "127.0.0.1:4000".into(),
@@ -266,10 +295,8 @@ mod configuration_tests {
     }
 
     #[test]
-    fn legacy_and_partial_configuration() {
-        assert!(resolve_virtual_key_settings(&config(), None, None)
-            .unwrap()
-            .is_none());
+    fn missing_and_partial_configuration_is_rejected() {
+        assert!(resolve_virtual_key_settings(&config(), None, None).is_err());
         assert!(resolve_virtual_key_settings(
             &config(),
             Some("postgres://localhost/app".into()),
@@ -284,9 +311,7 @@ mod configuration_tests {
     #[test]
     fn toml_settings_and_per_setting_environment_overrides() {
         let config = configured();
-        let (url, admin) = resolve_virtual_key_settings(&config, None, None)
-            .unwrap()
-            .unwrap();
+        let (url, admin) = resolve_virtual_key_settings(&config, None, None).unwrap();
         assert_eq!(url, config.database_url.clone().unwrap());
         assert_eq!(admin, "a".repeat(32));
         let (url, admin) = resolve_virtual_key_settings(
@@ -294,13 +319,10 @@ mod configuration_tests {
             Some("postgres://localhost/override".into()),
             Some("b".repeat(32)),
         )
-        .unwrap()
         .unwrap();
         assert_eq!(url, "postgres://localhost/override");
         assert_eq!(admin, "b".repeat(32));
-        let (_, admin) = resolve_virtual_key_settings(&config, None, Some("b".repeat(32)))
-            .unwrap()
-            .unwrap();
+        let (_, admin) = resolve_virtual_key_settings(&config, None, Some("b".repeat(32))).unwrap();
         assert_eq!(admin, "b".repeat(32));
     }
 

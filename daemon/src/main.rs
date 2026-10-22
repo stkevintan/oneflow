@@ -15,7 +15,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use auth::{AuthMode, PolicyCache};
+use auth::PolicyCache;
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use protocol::{ControlMessage, DaemonMessage, Heartbeat, ModelConfig, Registration, Telemetry};
@@ -45,9 +45,6 @@ struct Args {
     /// Config file to read (defaults to ./config.toml when present).
     #[arg(short, long, value_name = "PATH")]
     config: Option<PathBuf>,
-    /// Inference authentication mode (default: legacy).
-    #[arg(long, value_enum)]
-    auth_mode: Option<AuthMode>,
     /// HTTP listener address.
     #[arg(long, value_name = "SOCKET")]
     listen_addr: Option<String>,
@@ -68,10 +65,10 @@ struct Args {
     max_response_bytes: Option<usize>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct DaemonConfig {
-    auth_mode: Option<AuthMode>,
+    control_token: Option<String>,
     cp: Option<String>,
     listen_addr: Option<String>,
     daemon_id: Option<String>,
@@ -90,7 +87,9 @@ impl DaemonConfig {
     }
 
     fn load_from_str(contents: &str) -> Result<Self> {
-        toml::from_str(contents).context("daemon config must contain daemon settings at top level")
+        toml::from_str(contents).map_err(|err: toml::de::Error| {
+            anyhow::anyhow!("invalid daemon configuration: {}", err.message())
+        })
     }
 
     fn load_default_or_explicit(path: Option<&Path>) -> Result<Self> {
@@ -107,7 +106,24 @@ impl DaemonConfig {
     }
 
     fn resolve(args: &Args, file: Self) -> Result<ResolvedConfig> {
-        let auth_mode = args.auth_mode.or(file.auth_mode).unwrap_or_default();
+        let token = env::var_os("ONEFLOW_DAEMON_TOKEN")
+            .map(|value| {
+                value
+                    .into_string()
+                    .map_err(|_| anyhow::anyhow!("ONEFLOW_DAEMON_TOKEN must be UTF-8"))
+            })
+            .transpose()?;
+        Self::resolve_with_token(args, file, token)
+    }
+
+    fn resolve_with_token(
+        args: &Args,
+        file: Self,
+        control_token: Option<String>,
+    ) -> Result<ResolvedConfig> {
+        let control_token = control_token.or(file.control_token.clone()).context(
+            "daemon token required: provide ONEFLOW_DAEMON_TOKEN or the TOML control_token setting",
+        )?;
         let cp = args
             .cp
             .clone()
@@ -148,39 +164,34 @@ impl DaemonConfig {
             .or(file.max_response_bytes)
             .unwrap_or(DEFAULT_MAX_RESPONSE_BYTES);
 
-        let control_token = if auth_mode == AuthMode::VirtualKeys {
-            anyhow::ensure!(
-                env_list("DAEMON_API_KEYS").is_empty(),
-                "DAEMON_API_KEYS must be unset in virtual_keys mode"
-            );
-            let token = env::var("ONEFLOW_DAEMON_TOKEN")
-                .context("ONEFLOW_DAEMON_TOKEN is required in virtual_keys mode")?;
-            anyhow::ensure!(!token.trim().is_empty(), "ONEFLOW_DAEMON_TOKEN is empty");
-            let url = url::Url::parse(&cp).context("invalid control-plane URL")?;
-            anyhow::ensure!(
-                url.scheme() == "wss"
-                    || (url.scheme() == "ws"
-                        && url.host_str().is_some_and(|host| {
-                            host == "localhost"
-                                || host
-                                    .trim_start_matches('[')
-                                    .trim_end_matches(']')
-                                    .parse::<std::net::IpAddr>()
-                                    .is_ok_and(|ip| ip.is_loopback())
-                        })),
-                "virtual_keys requires wss for non-loopback control connections"
-            );
-            anyhow::ensure!(
-                url.username().is_empty() && url.password().is_none() && url.query().is_none(),
-                "put control credentials in ONEFLOW_DAEMON_TOKEN, not the URL"
-            );
-            Some(token)
-        } else {
-            None
-        };
+        anyhow::ensure!(
+            control_token.len() >= 32
+                && !control_token.bytes().any(|byte| byte.is_ascii_whitespace()),
+            "ONEFLOW_DAEMON_TOKEN must be at least 32 non-whitespace bytes"
+        );
+        let url = url::Url::parse(&cp).context("invalid control-plane URL")?;
+        anyhow::ensure!(
+            url.scheme() == "wss"
+                || (url.scheme() == "ws"
+                    && url.host_str().is_some_and(|host| {
+                        host == "localhost"
+                            || host
+                                .trim_start_matches('[')
+                                .trim_end_matches(']')
+                                .parse::<std::net::IpAddr>()
+                                .is_ok_and(|ip| ip.is_loopback())
+                    })),
+            "wss is required for non-loopback control connections"
+        );
+        anyhow::ensure!(
+            url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none(),
+            "put control credentials in ONEFLOW_DAEMON_TOKEN, not the URL"
+        );
         Ok(ResolvedConfig {
             control_token,
-            auth_mode,
             cp,
             listen_addr,
             daemon_id,
@@ -193,8 +204,7 @@ impl DaemonConfig {
 }
 
 struct ResolvedConfig {
-    control_token: Option<String>,
-    auth_mode: AuthMode,
+    control_token: String,
     cp: String,
     listen_addr: String,
     daemon_id: String,
@@ -207,6 +217,10 @@ struct ResolvedConfig {
 #[cfg(test)]
 mod config_tests {
     use super::*;
+
+    fn resolve(args: &Args, file: DaemonConfig) -> Result<ResolvedConfig> {
+        DaemonConfig::resolve_with_token(args, file, Some("t".repeat(64)))
+    }
 
     #[test]
     fn example_config_has_a_fixed_local_listener() {
@@ -221,7 +235,7 @@ mod config_tests {
     fn defaults_to_a_fixed_local_listener() {
         let args =
             Args::try_parse_from(["oneflowd", "--cp", "ws://localhost:4000/control"]).unwrap();
-        let resolved = DaemonConfig::resolve(&args, DaemonConfig::default()).unwrap();
+        let resolved = resolve(&args, DaemonConfig::default()).unwrap();
         let listen_addr: SocketAddr = resolved.listen_addr.parse().unwrap();
 
         assert!(listen_addr.ip().is_loopback());
@@ -241,6 +255,76 @@ mod config_tests {
             "daemon.toml"
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn credentials_and_secure_control_url_are_required() {
+        let args = Args::try_parse_from(["oneflowd", "--cp", "ws://localhost/control"]).unwrap();
+        for token in [
+            "",
+            "short",
+            "contains whitespace in a token of sufficient length",
+        ] {
+            assert!(DaemonConfig::resolve_with_token(
+                &args,
+                DaemonConfig::default(),
+                Some(token.into())
+            )
+            .is_err());
+        }
+        for url in [
+            "ws://remote.example/control",
+            "https://remote.example/control",
+            "wss://user:password@remote.example/control",
+            "wss://remote.example/control?token=secret",
+        ] {
+            let args = Args::try_parse_from(["oneflowd", "--cp", url]).unwrap();
+            assert!(resolve(&args, DaemonConfig::default()).is_err(), "{url}");
+        }
+        for url in [
+            "wss://remote.example/control",
+            "ws://127.0.0.1:4000/control",
+            "ws://[::1]:4000/control",
+        ] {
+            let args = Args::try_parse_from(["oneflowd", "--cp", url]).unwrap();
+            assert!(resolve(&args, DaemonConfig::default()).is_ok(), "{url}");
+        }
+    }
+
+    #[test]
+    fn removed_auth_mode_options_are_rejected() {
+        assert!(Args::try_parse_from(["oneflowd", "--auth-mode", "legacy"]).is_err());
+        assert!(DaemonConfig::load_from_str("auth_mode = \"legacy\"").is_err());
+        assert!(DaemonConfig::load_from_str("auth_mode = \"virtual_keys\"").is_err());
+    }
+
+    #[test]
+    fn downloaded_config_is_standalone_and_environment_token_overrides_file() {
+        let token = "ofd_".to_string() + &"a".repeat(64);
+        let contents = format!(
+            "cp = \"wss://control.example/control\"\ndaemon_id = \"server-a\"\ncontrol_token = \"{token}\"\nlisten_addr = \"127.0.0.1:9000\"\n"
+        );
+        let file = DaemonConfig::load_from_str(&contents).unwrap();
+        let args = Args::try_parse_from(["oneflowd", "-c", "config.toml"]).unwrap();
+        let resolved = DaemonConfig::resolve_with_token(&args, file.clone(), None).unwrap();
+        assert_eq!(resolved.cp, "wss://control.example/control");
+        assert_eq!(resolved.daemon_id, "server-a");
+        assert_eq!(resolved.control_token, token);
+        let overridden =
+            DaemonConfig::resolve_with_token(&args, file.clone(), Some("b".repeat(64))).unwrap();
+        assert_eq!(overridden.control_token, "b".repeat(64));
+        assert!(DaemonConfig::resolve_with_token(&args, file, Some(String::new())).is_err());
+        let empty = DaemonConfig::default();
+        assert!(DaemonConfig::resolve_with_token(&args, empty, None).is_err());
+    }
+
+    #[test]
+    fn config_parse_errors_do_not_include_secret_source() {
+        let secret = "private-daemon-credential";
+        let error = DaemonConfig::load_from_str(&format!("control_token = \"{secret}"))
+            .err()
+            .unwrap();
+        assert!(!format!("{error:#}").contains(secret));
     }
 
     #[test]
@@ -265,7 +349,7 @@ mod config_tests {
         let args = Args::try_parse_from([
             "daemon",
             "--cp",
-            "ws://cli.example:4000/control",
+            "wss://cli.example:4000/control",
             "--listen-addr",
             "127.0.0.1:9001",
         ])
@@ -276,18 +360,17 @@ mod config_tests {
             ..DaemonConfig::default()
         };
 
-        let resolved = DaemonConfig::resolve(&args, file).unwrap();
-        assert_eq!(resolved.cp, "ws://cli.example:4000/control");
+        let resolved = resolve(&args, file).unwrap();
+        assert_eq!(resolved.cp, "wss://cli.example:4000/control");
         assert_eq!(resolved.listen_addr, "127.0.0.1:9001");
     }
 
     #[tokio::test]
     async fn authenticated_control_channel_applies_snapshot_and_acknowledges() {
         let args = Args::try_parse_from(["oneflowd", "--cp", "ws://localhost/control"]).unwrap();
-        let resolved = DaemonConfig::resolve(&args, DaemonConfig::default()).unwrap();
+        let resolved = resolve(&args, DaemonConfig::default()).unwrap();
         let mut settings = DaemonSettings::from_config(&resolved);
-        settings.auth_mode = AuthMode::VirtualKeys;
-        settings.control_token = Some("test-control-token".into());
+        settings.control_token = "test-control-token".into();
         let request = control_request("ws://localhost/control", &settings).unwrap();
         assert_eq!(
             request.headers()["authorization"],
@@ -355,11 +438,8 @@ mod config_tests {
 /// Tunables resolved once at startup from the config file and environment.
 #[derive(Clone)]
 pub(crate) struct DaemonSettings {
-    pub(crate) control_token: Option<String>,
-    pub(crate) auth_mode: AuthMode,
+    pub(crate) control_token: String,
     pub(crate) daemon_id: String,
-    /// Client-facing keys for `/v1/*`. Empty means the API is open.
-    pub(crate) api_keys: Vec<String>,
     pub(crate) connect_timeout: Duration,
     pub(crate) read_timeout: Duration,
     pub(crate) request_timeout: Duration,
@@ -370,9 +450,7 @@ impl DaemonSettings {
     fn from_config(config: &ResolvedConfig) -> Self {
         Self {
             control_token: config.control_token.clone(),
-            auth_mode: config.auth_mode,
             daemon_id: config.daemon_id.clone(),
-            api_keys: env_list("DAEMON_API_KEYS"),
             connect_timeout: Duration::from_millis(config.connect_timeout_ms),
             read_timeout: Duration::from_millis(config.read_timeout_ms),
             request_timeout: Duration::from_millis(config.request_timeout_ms),
@@ -502,19 +580,6 @@ fn env_usize(name: &str) -> Option<usize> {
     }
 }
 
-fn env_list(name: &str) -> Vec<String> {
-    env::var(name)
-        .map(|value| {
-            value
-                .split(',')
-                .map(str::trim)
-                .filter(|entry| !entry.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -537,10 +602,6 @@ async fn main() -> Result<()> {
         .with_context(|| format!("invalid daemon listen_addr: {}", config.listen_addr))?;
     let cluster_name = env::var("CLUSTER_NAME").unwrap_or_else(|_| "cluster-ssh198".to_string());
     let hostname = env::var("HOSTNAME").unwrap_or_else(|_| "unknown".to_string());
-
-    if settings.auth_mode == AuthMode::Legacy && settings.api_keys.is_empty() {
-        warn!("DAEMON_API_KEYS is unset: /v1/* is open to anyone who can reach this port");
-    }
 
     let (telemetry_tx, telemetry_rx) = mpsc::channel(256);
     let state = AppState::new(settings, telemetry_tx)?;
@@ -590,14 +651,10 @@ async fn run_control_channel(
                     daemon_id: state.settings.daemon_id.clone(),
                     cluster_name: cluster_name.clone(),
                     version: env!("CARGO_PKG_VERSION").to_string(),
-                    capabilities: if state.settings.auth_mode == AuthMode::VirtualKeys {
-                        vec![
-                            "openai-compatible".to_string(),
-                            "virtual-keys-v1".to_string(),
-                        ]
-                    } else {
-                        vec!["openai-compatible".to_string()]
-                    },
+                    capabilities: vec![
+                        "openai-compatible".to_string(),
+                        "virtual-keys-v1".to_string(),
+                    ],
                     hostname: hostname.clone(),
                 });
 
@@ -681,10 +738,6 @@ async fn run_control_channel(
 async fn handle_control_message(text: &str, state: &AppState) -> Option<DaemonMessage> {
     match serde_json::from_str::<ControlMessage>(text) {
         Ok(ControlMessage::VirtualKeyPolicySnapshot(snapshot)) => {
-            if state.settings.auth_mode != AuthMode::VirtualKeys {
-                warn!("ignored virtual-key policy in legacy mode");
-                return None;
-            }
             let result =
                 state
                     .policies
@@ -721,25 +774,20 @@ fn control_request(
     settings: &DaemonSettings,
 ) -> Result<tokio_tungstenite::tungstenite::http::Request<()>> {
     let mut request = url.into_client_request()?;
-    if settings.auth_mode == AuthMode::VirtualKeys {
-        let token = settings
-            .control_token
-            .as_deref()
-            .context("ONEFLOW_DAEMON_TOKEN is missing")?;
-        let mut authorization: tokio_tungstenite::tungstenite::http::HeaderValue =
-            format!("Bearer {token}")
-                .parse()
-                .context("ONEFLOW_DAEMON_TOKEN is not a valid HTTP header")?;
-        authorization.set_sensitive(true);
-        request.headers_mut().insert("authorization", authorization);
-        request.headers_mut().insert(
-            "x-oneflow-daemon-id",
-            settings
-                .daemon_id
-                .parse()
-                .context("daemon_id is not a valid HTTP header")?,
-        );
-    }
+    let token = &settings.control_token;
+    let mut authorization: tokio_tungstenite::tungstenite::http::HeaderValue =
+        format!("Bearer {token}")
+            .parse()
+            .context("ONEFLOW_DAEMON_TOKEN is not a valid HTTP header")?;
+    authorization.set_sensitive(true);
+    request.headers_mut().insert("authorization", authorization);
+    request.headers_mut().insert(
+        "x-oneflow-daemon-id",
+        settings
+            .daemon_id
+            .parse()
+            .context("daemon_id is not a valid HTTP header")?,
+    );
     Ok(request)
 }
 

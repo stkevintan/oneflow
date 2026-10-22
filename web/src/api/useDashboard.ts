@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { ApiError, getConfig, getStatus, listDaemons, listDaemonCredentials, listUsageEvents } from "./client";
+import { getConfig, getStatus, listDaemons, listDaemonCredentials, listUsageEvents } from "./client";
 import type { Daemon, DaemonCredential, ModelConfigSet, StatusResponse, UsageEvent } from "./client";
 
 export type ConnectionState = "connecting" | "live" | "offline";
@@ -12,7 +12,6 @@ export interface DashboardSnapshot {
   status: StatusResponse;
   daemons: Daemon[];
   credentials: DaemonCredential[];
-  credentialError: string | null;
   /** Newest first. */
   usage: UsageEvent[];
   config: ModelConfigSet;
@@ -31,18 +30,10 @@ async function fetchSnapshot(signal: AbortSignal): Promise<DashboardSnapshot> {
     listDaemons(signal),
     listUsageEvents({ limit: RECENT_USAGE_LIMIT }, signal),
     getConfig(signal),
-    listDaemonCredentials(signal).then(
-      (value) => ({ items: value.items, error: null }),
-      (cause: unknown) => {
-        if (cause instanceof ApiError && cause.status === 503) {
-          return { items: [], error: cause.message };
-        }
-        throw cause;
-      },
-    ),
+    listDaemonCredentials(signal),
   ]);
   return { status, daemons: daemons.items, usage: usage.items, config,
-    credentials: credentials.items, credentialError: credentials.error };
+    credentials: credentials.items };
 }
 
 /**

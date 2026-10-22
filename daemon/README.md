@@ -8,10 +8,13 @@ Build it from the repository root:
 cargo build --release -p oneflowd
 ```
 
-Copy `target/release/oneflowd` and its standalone `config.toml` to the remote
+Create a daemon in the dashboard and click **Download config.toml**. It includes
+the control-plane URL, daemon ID, and one-time token. Copy
+`target/release/oneflowd` and the downloaded file securely to the remote
 machine, then start it from that config's directory:
 
 ```sh
+chmod 600 config.toml
 ./oneflowd
 ```
 
@@ -42,7 +45,6 @@ Startup logs include the daemon ID, control-plane URL, and bound listener
 address. Connection-state logs show connecting, connected, registered, and
 reconnecting states. Set `RUST_LOG=oneflowd=debug` for more detail.
 
-`DAEMON_API_KEYS` optionally sets comma-separated client API keys.
 `DAEMON_ID`, `DAEMON_LISTEN_ADDR`, `UPSTREAM_CONNECT_TIMEOUT_MS`,
 `UPSTREAM_READ_TIMEOUT_MS`, `UPSTREAM_REQUEST_TIMEOUT_MS`, and
 `MAX_UPSTREAM_RESPONSE_BYTES` override matching TOML values. CLI options
@@ -51,12 +53,13 @@ label.
 
 ## Managed virtual keys
 
-Set `auth_mode = "virtual_keys"` in the daemon TOML (or pass
-`--auth-mode virtual_keys`) and set `ONEFLOW_DAEMON_TOKEN` to the daemon's
-control-channel credential. Provision it through **Daemon credentials** in the
+Virtual API keys are mandatory. The downloaded TOML's `control_token` is the daemon's
+control-channel credential; `ONEFLOW_DAEMON_TOKEN` overrides it if set.
+Provision it through **Daemon credentials** in the
 dashboard or administrator-authenticated `POST /v1/daemons`; configure the same
 `daemon_id` on the daemon. The token is returned once. Rotation replaces it;
-deploy the replacement and restart the daemon. Do not set `DAEMON_API_KEYS` in this mode.
+download/deploy the replacement configuration and restart the daemon. There is no authentication mode
+switch and no static client-key or anonymous-access path.
 Remote control connections require `wss://`; local development may use
 loopback `ws://`.
 

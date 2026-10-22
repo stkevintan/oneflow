@@ -109,11 +109,11 @@ mod tests {
     }
 
     #[test]
-    fn example_config_is_valid_legacy_mode() {
+    fn example_config_includes_required_settings() {
         let config: ServiceConfig =
             toml::from_str(include_str!("../../config.example.toml")).unwrap();
-        assert!(config.control_plane.database_url.is_none());
-        assert!(config.control_plane.admin_token.is_none());
+        assert!(config.control_plane.database_url.is_some());
+        assert!(config.control_plane.admin_token.is_some());
     }
 
     #[test]

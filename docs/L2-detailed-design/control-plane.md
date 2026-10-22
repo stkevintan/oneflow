@@ -15,7 +15,7 @@ serves no UI; dashboards, CLIs, and other clients are deployed separately (see
 | `control-plane/src/key_api.rs` | LiteLLM-style key-management request mapping and response shapes |
 | `control-plane/src/daemon_credentials.rs` | Durable daemon credential provisioning, rotation, revocation, and hash validation |
 
-With virtual-key mode enabled, desired models and keys are stored in PostgreSQL,
+Desired models and keys are stored in PostgreSQL,
 not `MemoryStore`. Management routes require the administrator token (except
 liveness), and control connections authenticate a bound daemon identity.
 Presence and recent usage remain process-local. See
@@ -96,8 +96,8 @@ web dev and preview servers proxy `/v1`, so the browser sees one origin.
 
 In PostgreSQL-backed mode, management requires the administrator bearer token,
 except `/v1/health`. `/control` requires a provisioned daemon token and matching
-`x-oneflow-daemon-id`. New daemon-management operations return 503 in legacy mode;
-existing presence/config/usage routes retain legacy behavior.
+`x-oneflow-daemon-id`. Database access and administrator credentials are required
+at startup; storage failures return explicit 503 errors, never an in-memory fallback.
 
 Daemon credentials use CSPRNG 256-bit secrets, returned once as `ofd_<hex>`.
 Only their SHA-256 hashes are persisted. Rotation replaces the hash, revocation

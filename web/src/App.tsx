@@ -38,7 +38,7 @@ export default function App() {
           <button type="submit" className="rounded bg-slate-800 px-3 py-2">
             Apply token
           </button>
-          <span>Optional in legacy mode. Kept in memory until page reload.</span>
+          <span>Required for management. Kept in memory until page reload.</span>
         </form>
         {error ? (
           <p
@@ -51,7 +51,6 @@ export default function App() {
 
         <DaemonCredentials key={authRevision}
           credentials={snapshot?.credentials ?? []}
-          unavailable={snapshot?.credentialError ?? null}
           ready={connection === "live"} onChanged={refresh} />
 
         <Card

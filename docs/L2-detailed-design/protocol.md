@@ -102,8 +102,8 @@ counts are unknown, not zero.
 literal (`impl From<Telemetry> for UsageEvent`). A field added on
 either side therefore becomes a compile error instead of silent drift.
 `received_at` is stamped by the control plane.
-`virtual_key_id` is nullable for legacy requests and contains only the
-non-secret key ID for virtual-key requests.
+`virtual_key_id` is required and contains only the non-secret key ID used to
+authorize the request. Telemetry without attribution is rejected.
 
 ## Compatibility rules
 

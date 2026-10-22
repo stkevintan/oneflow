@@ -234,7 +234,7 @@ mod tests {
 
     fn telemetry(daemon_id: &str, model_name: &str, request_id: &str) -> DaemonMessage {
         DaemonMessage::Telemetry(Telemetry {
-            virtual_key_id: None,
+            virtual_key_id: "a".repeat(32),
             daemon_id: daemon_id.to_string(),
             model_name: model_name.to_string(),
             prompt_tokens: 1,

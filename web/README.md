@@ -7,17 +7,18 @@ dashboard is deployed on its own, like any other client (CLI, TUI, desktop); see
 
 ## Daemon provisioning
 
-With PostgreSQL-backed mode enabled, apply the administrator token and use
-**Daemon credentials** to create an ID. Save the one-time token on the daemon
-host as `ONEFLOW_DAEMON_TOKEN` and configure the same `daemon_id` with
-`auth_mode = "virtual_keys"`. Tokens stay only in page memory; dismiss after
-deploying. The list includes offline and revoked daemons. Rotation/revocation
+Apply the required administrator token and use
+**Daemon credentials** to create an ID, then click **Download config.toml**.
+It includes the configured control-plane URL, daemon ID, generated token, and
+loopback listener. Secure the downloaded file and run `oneflowd -c config.toml`.
+There is no authentication-mode setting. The one-time result stays only in page
+memory; dismiss after downloading. The list includes offline and revoked daemons. Rotation/revocation
 require confirmation; rotation also reactivates a revoked credential. Restart
-the daemon after deploying a replacement token.
+the daemon after downloading/deploying its replacement configuration.
 
-Credential metadata is separate from the live connection table. Legacy mode
-shows an explicit storage-unavailable message rather than permitting unauthenticated
-provisioning. See [deployment](../docs/virtual-keys.md#3-start-a-virtual-key-daemon).
+Credential metadata is separate from the live connection table. Authentication
+and storage failures are surfaced explicitly; provisioning is never anonymous.
+See [deployment](../docs/virtual-keys.md#3-start-a-virtual-key-daemon).
 
 ## Contract-first workflow
 

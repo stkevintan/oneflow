@@ -77,7 +77,7 @@ export interface paths {
         put?: never;
         /**
          * Provision a daemon credential
-         * @description Requires PostgreSQL-backed mode and administrator authentication.
+         * @description Requires administrator authentication.
          *     The caller chooses a unique daemon ID. Returns a random token once;
          *     only its SHA-256 hash is stored. Duplicate IDs return 409, including
          *     revoked IDs. Rotate a credential if its creation response is lost.
@@ -99,7 +99,7 @@ export interface paths {
         };
         /**
          * List provisioned daemons, including offline and revoked credentials
-         * @description Administrator-only in PostgreSQL-backed mode; otherwise 503.
+         * @description Administrator-only. Database failures return 503.
          *     Metadata only: no token or token hash is returned. Connection presence
          *     remains available separately at GET /v1/daemons and is process-local.
          *     Responses use Cache-Control no-store.
@@ -359,6 +359,12 @@ export interface components {
             credential: components["schemas"]["DaemonCredential"];
             /** @description One-time plaintext control-channel token. Never log it. */
             token: string;
+            /**
+             * @description One-time standalone daemon configuration, ready to save as config.toml.
+             *     Includes cp from control_plane.websocket_url, daemon_id, control_token,
+             *     and a loopback listener. Contains the bearer secret; never log it.
+             */
+            config_toml: string;
         };
         DaemonCredentialList: {
             items: components["schemas"]["DaemonCredential"][];
@@ -477,8 +483,8 @@ export interface components {
             latency_ms: number;
             /** @description Whether the client requested a streaming response. */
             streamed: boolean;
-            /** @description Non-secret virtual key ID; null for legacy inference. */
-            virtual_key_id: string | null;
+            /** @description Non-secret virtual key ID used to authorize the request. */
+            virtual_key_id: string;
             /**
              * Format: int64
              * @description Unix timestamp in seconds, stamped by the control plane on arrival.

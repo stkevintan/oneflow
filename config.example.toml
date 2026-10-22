@@ -1,14 +1,15 @@
 [control_plane]
 bind_addr = "0.0.0.0:4000"
+# Public daemon-reachable endpoint embedded in downloaded daemon configurations.
+# Use wss:// for non-loopback deployments.
 websocket_url = "ws://127.0.0.1:4000/control"
 # The web dev and preview servers proxy /v1 and /key.
 cors_allowed_origins = []
 
-# Optional: enable durable storage and authenticated virtual-key mode.
-# Supply both settings together. Environment variables override each setting.
+# Required. Environment variables override each setting.
 # Use a percent-encoded PostgreSQL URL and your deployment's TLS settings.
-# database_url = "postgres://USER:PASSWORD@HOST:5432/DATABASE?sslmode=require"
-# admin_token = "REPLACE_WITH_RANDOM_ADMIN_TOKEN_AT_LEAST_32_BYTES"
+database_url = "postgres://USER:PASSWORD@HOST:5432/DATABASE?sslmode=require"
+admin_token = "REPLACE_WITH_RANDOM_ADMIN_TOKEN_AT_LEAST_32_BYTES"
 # Provision daemon tokens through the dashboard or POST /v1/daemons.
 
 [web]

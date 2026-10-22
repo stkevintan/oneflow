@@ -21,7 +21,8 @@ daemon [--config <path>] [--cp <ws-url>] [other overrides]
    TOML value, then built-in default (see [configuration.md](./configuration.md)).
    The control-plane URL is required and can come from `--cp`,
    `CONTROL_PLANE_URL`, or the TOML `cp` setting.
-4. Warn if `DAEMON_API_KEYS` is empty, because `/v1/*` is then unauthenticated.
+4. Require TOML `control_token` or its `ONEFLOW_DAEMON_TOKEN` override and validate the authenticated control endpoint.
+   Remote control connections require WSS.
 5. Create the telemetry `mpsc` channel (capacity 256) and `AppState`.
 6. Bind `listen_addr` **before** spawning the control channel, then log the
    bound address. The default `127.0.0.1:9000` keeps the API local-only at a
@@ -82,12 +83,11 @@ stateDiagram-v2
 
 ### Client authentication (`require_api_key`)
 
-For opt-in managed virtual keys, model permissions, and bounded offline leases,
-see [virtual-keys.md](./virtual-keys.md). The behavior below describes legacy mode.
-
-If `DAEMON_API_KEYS` (comma-separated) is set, `/v1/*` requires
-`Authorization: Bearer <key>`. Keys are compared in constant time. A failure
-returns 401 in OpenAI error shape. If the variable is unset, the API is open.
+Every `/v1/*` request requires a virtual API key in a bearer header. Tokens are
+checked in constant time against the current leased policy snapshot. Missing or
+invalid tokens return 401; absent/expired policy returns 503. Public model aliases
+must be allowed by the key, including model listing and lookup. See
+[virtual-keys.md](./virtual-keys.md) for model permissions and bounded offline leases.
 
 ## Chat completion pipeline
 
@@ -123,11 +123,13 @@ flowchart TD
 Endpoint: `chat_completions_endpoint(api_base)` trims a trailing `/` and
 appends `/chat/completions` unless it is already present.
 
-### Upstream authentication precedence (`configured_api_key`)
+### Upstream authentication
 
-1. `api_key_env`: read the named environment variable on the daemon host.
-2. `api_key`: the literal value from the config.
-3. Otherwise, forward the client's `Authorization` header unchanged.
+1. If `api_key_env` is set, read the named environment variable on the daemon
+   host; missing or blank values return 503 without trying a literal fallback.
+2. Otherwise use `api_key`, the literal value from the model config.
+3. With neither, send no upstream Authorization header. Client virtual keys
+   are never forwarded to providers.
 
 ### Non-streaming responses
 

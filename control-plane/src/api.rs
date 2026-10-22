@@ -78,76 +78,72 @@ async fn authorize_management(
 ) -> Response {
     let path = request.uri().path();
     let is_virtual_key_endpoint = path.starts_with("/key/") || path.starts_with("/v1/daemons");
-    if let Some(mode) = &state.virtual_key_mode {
-        if path == "/control" {
-            let identity = request
-                .headers()
-                .get("x-oneflow-daemon-id")
-                .and_then(|value| value.to_str().ok());
-            let token = request
-                .headers()
-                .get(header::AUTHORIZATION)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.strip_prefix("Bearer "))
-                .filter(|token| {
-                    !token.is_empty() && !token.bytes().any(|byte| byte.is_ascii_whitespace())
-                });
-            let identity = identity.zip(token).map(|(id, token)| {
-                crate::daemon_credentials::AuthenticatedDaemon {
+    let mode = &state.access;
+    if path == "/control" {
+        let identity = request
+            .headers()
+            .get("x-oneflow-daemon-id")
+            .and_then(|value| value.to_str().ok());
+        let token = request
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .filter(|token| {
+                !token.is_empty() && !token.bytes().any(|byte| byte.is_ascii_whitespace())
+            });
+        let identity =
+            identity.zip(token).map(
+                |(id, token)| crate::daemon_credentials::AuthenticatedDaemon {
                     daemon_id: id.to_string(),
                     token_hash: crate::daemon_credentials::token_hash(token),
-                }
-            });
-            let valid = match &identity {
-                Some(identity) => match mode.store.daemon_credential_valid(identity).await {
-                    Ok(valid) => valid,
-                    Err(err) => {
-                        tracing::error!(error = %err, "daemon authentication storage failure");
-                        return error(
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "daemon authentication is unavailable",
-                        );
-                    }
                 },
-                None => false,
-            };
-            if !valid {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    [(header::WWW_AUTHENTICATE, "Bearer")],
-                    "unauthorized",
-                )
-                    .into_response();
-            }
-            request
-                .extensions_mut()
-                .insert(identity.expect("validated daemon identity"));
-        } else if path != "/v1/health" {
-            let valid = request
-                .headers()
-                .get(header::AUTHORIZATION)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.strip_prefix("Bearer "))
-                .filter(|token| {
-                    !token.is_empty() && !token.bytes().any(|b| b.is_ascii_whitespace())
-                })
-                .is_some_and(|token| constant_time_token_eq(&mode.admin_token, token));
-            if !valid {
-                let mut response =
-                    error(StatusCode::UNAUTHORIZED, "invalid administrator credential");
+            );
+        let valid = match &identity {
+            Some(identity) => match mode.store.daemon_credential_valid(identity).await {
+                Ok(valid) => valid,
+                Err(err) => {
+                    tracing::error!(error = %err, "daemon authentication storage failure");
+                    return error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "daemon authentication is unavailable",
+                    );
+                }
+            },
+            None => false,
+        };
+        if !valid {
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(header::WWW_AUTHENTICATE, "Bearer")],
+                "unauthorized",
+            )
+                .into_response();
+        }
+        request
+            .extensions_mut()
+            .insert(identity.expect("validated daemon identity"));
+    } else if path != "/v1/health" {
+        let valid = request
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .filter(|token| !token.is_empty() && !token.bytes().any(|b| b.is_ascii_whitespace()))
+            .is_some_and(|token| constant_time_token_eq(&mode.admin_token, token));
+        if !valid {
+            let mut response = error(StatusCode::UNAUTHORIZED, "invalid administrator credential");
+            response
+                .headers_mut()
+                .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+            if is_virtual_key_endpoint {
                 response
                     .headers_mut()
-                    .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
-                if is_virtual_key_endpoint {
-                    response
-                        .headers_mut()
-                        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-                }
-                return response;
+                    .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
             }
+            return response;
         }
     }
-
     let mut response = next.run(request).await;
     if is_virtual_key_endpoint {
         response
@@ -199,18 +195,15 @@ async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
 }
 
 async fn get_config(State(state): State<AppState>) -> Response {
-    let config = match &state.virtual_key_mode {
-        Some(mode) => match mode.store.config().await {
-            Ok(config) => config,
-            Err(err) => {
-                tracing::error!(error = %err, "failed to read durable model configuration");
-                return error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "durable configuration is unavailable",
-                );
-            }
-        },
-        None => state.store.config().await,
+    let config = match state.access.store.config().await {
+        Ok(config) => config,
+        Err(err) => {
+            tracing::error!(error = %err, "failed to read durable model configuration");
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "durable configuration is unavailable",
+            );
+        }
     };
     Json(config).into_response()
 }
@@ -227,14 +220,12 @@ async fn put_config(
         return error(StatusCode::BAD_REQUEST, message);
     }
 
-    if let Some(mode) = &state.virtual_key_mode {
-        if let Err(err) = mode.store.set_config(&config).await {
-            tracing::error!(error = %err, "failed to persist durable model configuration");
-            return error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "durable configuration is unavailable",
-            );
-        }
+    if let Err(err) = state.access.store.set_config(&config).await {
+        tracing::error!(error = %err, "failed to persist durable model configuration");
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "durable configuration is unavailable",
+        );
     }
     state.store.set_config(config.clone()).await;
 
@@ -333,7 +324,7 @@ async fn list_usage_events(
     .into_response()
 }
 
-pub(crate) async fn publish_policy_hint(state: &AppState, mode: &crate::VirtualKeyMode) {
+pub(crate) async fn publish_policy_hint(state: &AppState, mode: &crate::AccessControl) {
     match mode.store.snapshot(now_ts()).await {
         Ok(snapshot) => {
             let _ = state
@@ -397,7 +388,7 @@ mod contract_tests {
                 .apply_daemon_message(
                     CONNECTION_ID,
                     DaemonMessage::Telemetry(Telemetry {
-                        virtual_key_id: None,
+                        virtual_key_id: "a".repeat(32),
                         daemon_id: "daemon-1".to_string(),
                         model_name: model_name.to_string(),
                         prompt_tokens: 3,
@@ -415,12 +406,27 @@ mod contract_tests {
         }
 
         let (broadcast, _) = broadcast::channel(8);
+        let key_store = match std::env::var("ONEFLOW_TEST_DATABASE_URL") {
+            Ok(url) => crate::virtual_keys::VirtualKeyStore::connect(&url, &default_config())
+                .await
+                .unwrap(),
+            Err(_) => crate::virtual_keys::VirtualKeyStore {
+                pool: sqlx::postgres::PgPoolOptions::new()
+                    .acquire_timeout(std::time::Duration::from_millis(100))
+                    .connect_lazy("postgres://unused@127.0.0.1:1/unused")
+                    .unwrap(),
+            },
+        };
         create_app(
             AppState {
                 store,
                 broadcast,
                 started_at: now_ts(),
-                virtual_key_mode: None,
+                access: Arc::new(crate::AccessControl {
+                    store: Arc::new(key_store),
+                    admin_token: Arc::new("test-admin-token".into()),
+                    control_plane_url: "wss://control.example/control".into(),
+                }),
             },
             cors,
         )
@@ -434,6 +440,7 @@ mod contract_tests {
         let builder = Request::builder()
             .method(Method::from_str(&method.to_ascii_uppercase()).expect("valid HTTP method"))
             .uri(path)
+            .header(header::AUTHORIZATION, "Bearer test-admin-token")
             .header("content-type", "application/json");
         match body {
             Some(body) => builder.body(Body::from(body.to_string())),
@@ -462,6 +469,7 @@ mod contract_tests {
 
     fn concrete_path(path: &str) -> String {
         path.replace("{connection_id}", CONNECTION_ID)
+            .replace("{daemon_id}", "missing-test-daemon")
     }
 
     fn schema_ref_name(schema: &Value) -> Option<&str> {
@@ -514,12 +522,16 @@ mod contract_tests {
                 if !matches!(method.as_str(), "get" | "post" | "put" | "patch" | "delete") {
                     continue;
                 }
-                let (status, _) = call(app().await, method, &concrete_path(path), None).await;
-                assert_ne!(
-                    status,
-                    StatusCode::NOT_FOUND,
-                    "contract declares {method} {path} but the router does not serve it"
-                );
+                let (status, body) = call(app().await, method, &concrete_path(path), None).await;
+                if status == StatusCode::NOT_FOUND {
+                    assert!(
+                        !body["error"]
+                            .as_str()
+                            .unwrap()
+                            .starts_with("no API route matches"),
+                        "contract declares {method} {path} but the router does not serve it"
+                    );
+                }
                 assert_ne!(
                     status,
                     StatusCode::METHOD_NOT_ALLOWED,
@@ -531,29 +543,57 @@ mod contract_tests {
 
     #[tokio::test]
     async fn every_get_response_matches_its_contract_schema() {
+        if std::env::var_os("ONEFLOW_TEST_DATABASE_URL").is_none() {
+            eprintln!("Skipping database-backed response contracts: set ONEFLOW_TEST_DATABASE_URL");
+            return;
+        }
         let contract = contract();
+        let app = app().await;
+        let (_, config) = call(app.clone(), "get", "/v1/config", None).await;
+        let (status, created) = call(
+            app.clone(),
+            "post",
+            "/key/generate",
+            Some(&json!({"models": [config["models"][0]["model_name"]]}).to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
         for (path, item) in contract["paths"].as_object().unwrap() {
             let Some(operation) = item.get("get") else {
                 continue;
             };
-            if path.starts_with("/key/") || path == "/v1/daemons/credentials" {
-                let (status, body) = call(app().await, "get", path, None).await;
-                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "GET {path}");
-                assert!(body["error"].is_string());
-                continue;
-            }
             let schema = &operation["responses"]["200"]["content"]["application/json"]["schema"];
             let schema_name = schema_ref_name(schema)
                 .unwrap_or_else(|| panic!("GET {path} 200 response should reference a schema"));
 
-            let (status, body) = call(app().await, "get", &concrete_path(path), None).await;
+            let path = if path == "/key/info" {
+                format!("/key/info?key={}", created["token"].as_str().unwrap())
+            } else {
+                concrete_path(path)
+            };
+            let (status, body) = call(app.clone(), "get", &path, None).await;
             assert_eq!(status, StatusCode::OK, "GET {path}");
             assert_matches_schema(&contract, schema_name, &body, &format!("GET {path}"));
         }
+        assert_eq!(
+            call(
+                app,
+                "post",
+                "/key/delete",
+                Some(&json!({"keys":[created["token"]]}).to_string())
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
     }
 
     #[tokio::test]
     async fn config_put_round_trips_and_is_reported_in_status() {
+        if std::env::var_os("ONEFLOW_TEST_DATABASE_URL").is_none() {
+            eprintln!("Skipping durable config test: set ONEFLOW_TEST_DATABASE_URL");
+            return;
+        }
         let app = app().await;
         let payload = json!({
             "version": "contract-test",
@@ -644,18 +684,82 @@ mod contract_tests {
     }
 
     #[tokio::test]
-    async fn credential_routes_report_unavailable_without_opt_in_storage() {
+    async fn all_management_and_control_routes_require_authentication() {
+        let app = app().await;
+        let contract = contract();
+        for (path, item) in contract["paths"].as_object().unwrap() {
+            if path == "/v1/health" {
+                continue;
+            }
+            for method in item
+                .as_object()
+                .unwrap()
+                .keys()
+                .filter(|method| matches!(method.as_str(), "get" | "post" | "put"))
+            {
+                let mut request = request(method, &concrete_path(path), None);
+                request.headers_mut().remove(header::AUTHORIZATION);
+                let response = app.clone().oneshot(request).await.unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "{method} {path}"
+                );
+                assert_eq!(response.headers()[header::WWW_AUTHENTICATE], "Bearer");
+            }
+        }
+        for supplied in [None, Some("Bearer invalid")] {
+            let mut request = request("GET", "/control", None);
+            request.headers_mut().remove(header::AUTHORIZATION);
+            if let Some(value) = supplied {
+                request
+                    .headers_mut()
+                    .insert(header::AUTHORIZATION, HeaderValue::from_static(value));
+            }
+            assert_eq!(
+                app.clone().oneshot(request).await.unwrap().status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        let mut request = request("GET", "/v1/health", None);
+        request.headers_mut().remove(header::AUTHORIZATION);
+        assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn credential_routes_fail_explicitly_when_database_is_unavailable() {
+        let (broadcast, _) = broadcast::channel(8);
+        let app = create_app(
+            AppState {
+                store: Arc::new(MemoryStore::new(default_config())),
+                broadcast,
+                started_at: now_ts(),
+                access: Arc::new(crate::AccessControl {
+                    admin_token: Arc::new("test-admin-token".into()),
+                    control_plane_url: "wss://control.example/control".into(),
+                    store: Arc::new(crate::virtual_keys::VirtualKeyStore {
+                        pool: sqlx::postgres::PgPoolOptions::new()
+                            .acquire_timeout(std::time::Duration::from_millis(100))
+                            .connect_lazy("postgres://unused@127.0.0.1:1/unused")
+                            .unwrap(),
+                    }),
+                }),
+            },
+            vec![],
+        );
         for (method, path, body) in [
+            ("get", "/v1/config", None),
+            ("put", "/v1/config", Some("{\"version\":\"test\",\"models\":[{\"model_name\":\"test\",\"provider\":\"test\",\"api_base\":\"https://example.invalid\",\"parameters\":{}}]}")),
             ("get", "/key/list", None),
-            ("post", "/key/generate", Some("{}")),
-            ("get", "/key/info?key=unknown", None),
-            ("post", "/key/delete", Some("{\"keys\":[]}")),
+            ("post", "/key/generate", Some("{\"models\":[\"test\"]}")),
+            ("get", "/key/info?key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", None),
+            ("post", "/key/delete", Some("{\"keys\":[\"unknown\"]}")),
             ("post", "/v1/daemons", Some("{\"daemon_id\":\"test\"}")),
             ("get", "/v1/daemons/credentials", None),
             ("post", "/v1/daemons/test/rotate", None),
             ("post", "/v1/daemons/test/revoke", None),
         ] {
-            let (status, response) = call(app().await, method, path, body).await;
+            let (status, response) = call(app.clone(), method, path, body).await;
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{method} {path}");
             assert!(response["error"].is_string());
         }

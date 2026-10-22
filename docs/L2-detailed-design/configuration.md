@@ -21,9 +21,9 @@ daemons; see [protocol.md](./protocol.md).
 bind_addr = "0.0.0.0:4000"                      # control-plane listener
 websocket_url = "ws://127.0.0.1:4000/control"   # used by the web /v1 proxy
 cors_allowed_origins = []                       # browser origins allowed cross-origin
-# Optional; supply both to enable authenticated virtual-key mode:
-# database_url = "postgres://USER:PASSWORD@HOST:5432/DATABASE?sslmode=require"
-# admin_token = "REPLACE_WITH_RANDOM_ADMIN_TOKEN_AT_LEAST_32_BYTES"
+# Required, unless supplied by environment:
+database_url = "postgres://USER:PASSWORD@HOST:5432/DATABASE?sslmode=require"
+admin_token = "REPLACE_WITH_RANDOM_ADMIN_TOKEN_AT_LEAST_32_BYTES"
 # Provision daemon credentials through the dashboard or POST /v1/daemons.
 
 [web]
@@ -35,7 +35,7 @@ addr = "127.0.0.1:5173"                         # Vite dev and preview servers
 
 ```rust
 pub struct ServiceConfig {
-    pub control_plane: ControlPlaneConfig, // addresses, CORS, optional virtual-key settings
+    pub control_plane: ControlPlaneConfig, // addresses, CORS, database and administrator settings
     pub web: WebConfig,                    // addr
 }
 
@@ -46,7 +46,10 @@ ConfigProvider::load()           // $LLMCP_CONFIG or ./config.toml
 - `bind_addr` must parse as a `SocketAddr`; otherwise the control plane exits at
   startup.
 - `websocket_url` is the address the dashboard dev and preview proxies use to
-  find the control plane. Daemons use their own config.
+  find the control plane and the `cp` URL embedded in newly provisioned daemon
+  downloads. Configure a daemon-reachable public WSS URL for remote deployment;
+  loopback WS is allowed for local development. Credentials, query strings,
+  and fragments are forbidden.
 - `cors_allowed_origins` (optional, default `[]`) lists exact browser origins,
   such as `"https://dashboard.example"`, allowed to call `/v1` cross-origin.
   Each entry must be a valid header value, or the control plane exits at
@@ -54,10 +57,10 @@ ConfigProvider::load()           // $LLMCP_CONFIG or ./config.toml
   proxy and need no entry.
 - The web bundle itself reads `VITE_CONTROL_PLANE_URL` at build time (see
   [web.md](./web.md#base-url)) when it is hosted on another origin.
-- `database_url` and `admin_token` enable virtual-key mode.
+- `database_url` and `admin_token` are mandatory.
   `ONEFLOW_DATABASE_URL` and `ONEFLOW_ADMIN_TOKEN`
   override their respective TOML settings. After resolution both settings
-  are required, otherwise startup fails; no settings retains legacy mode.
+  are required; missing either or both causes startup to fail.
   Empty or invalid credentials are rejected, not replaced by file defaults.
   PostgreSQL migrations run on startup. See [deployment](../virtual-keys.md).
 - Daemon credentials are provisioned and managed through the dashboard/API and
@@ -72,7 +75,6 @@ ConfigProvider::load()           // $LLMCP_CONFIG or ./config.toml
 | --- | --- | --- |
 | `--cp <URL>` | no | Control-plane WebSocket URL; overrides environment and TOML |
 | `-c, --config <PATH>` | no | Select a daemon TOML file instead of `./config.toml` |
-| `--auth-mode <MODE>` | no | `legacy` (default) or `virtual_keys` |
 | `--listen-addr <SOCKET>` | no | HTTP listener address |
 | `--daemon-id <ID>` | no | Identity reported during registration |
 | `--connect-timeout-ms <MS>` | no | Upstream connection timeout |
@@ -91,19 +93,21 @@ with `--config`. Settings use top-level keys; see
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `cp` | — | Control-plane WebSocket URL (required unless supplied by CLI or environment) |
+| `control_token` | — | Required provisioned daemon token unless `ONEFLOW_DAEMON_TOKEN` is set; included in dashboard downloads |
 | `listen_addr` | `127.0.0.1:9000` | Local-only HTTP listener; inference routes use fixed paths including `/v1/chat/completions` |
-| `auth_mode` | `legacy` | Use `virtual_keys` for managed model permissions and bounded policy leases |
 | `daemon_id` | `daemon-poc-001` | Identity reported in registration and telemetry |
 | `connect_timeout_ms` | 5000 | Upstream TCP/TLS connect timeout |
 | `read_timeout_ms` | 60000 | Upstream per-read timeout (bounds streaming stalls) |
 | `request_timeout_ms` | 120000 | Upstream total timeout for non-streaming requests |
 | `max_response_bytes` | 16777216 | Cap on a buffered non-streaming response body |
 
-All keys are optional; unknown keys are rejected.
+TOML keys may be supplied through the documented overrides; unknown keys are
+rejected. A control token from the file or `ONEFLOW_DAEMON_TOKEN` is required. There is no authentication-mode
+setting: virtual keys and policy leases are always enforced.
 
 ### Environment variables
 
-Virtual-key deployment may override the control-plane TOML settings with
+Deployments may override the control-plane TOML settings with
 `ONEFLOW_DATABASE_URL` and `ONEFLOW_ADMIN_TOKEN`, and uses
 `ONEFLOW_DAEMON_TOKEN` on each daemon. See
 [deployment and usage](../virtual-keys.md). Keep all secrets out of tracked files.
@@ -121,16 +125,16 @@ default**. The control-plane URL is required and can be supplied by `--cp`,
 | `UPSTREAM_READ_TIMEOUT_MS` | `read_timeout_ms` |
 | `UPSTREAM_REQUEST_TIMEOUT_MS` | `request_timeout_ms` |
 | `MAX_UPSTREAM_RESPONSE_BYTES` | `max_response_bytes` |
-| `DAEMON_API_KEYS` | Comma-separated client keys for `/v1/*`. Unset means open |
+| `ONEFLOW_DAEMON_TOKEN` | Overrides TOML `control_token`, including downloaded credentials |
 | `CLUSTER_NAME` | Cluster label in registration (default `cluster-ssh198`) |
 | `HOSTNAME` | Hostname in registration (default `unknown`) |
-| `RUST_LOG` | Log filter (default `daemon=info`) |
+| `RUST_LOG` | Log filter (default `oneflowd=info`) |
 | *any name in `api_key_env`* | Upstream provider key, referenced from model parameters |
 
 ## Known gaps
 
 - No hot reload: both services read their files only at startup.
-- Legacy-mode model configuration resets to the built-in default on restart;
-  virtual-key mode persists it in PostgreSQL.
-- Native TLS termination is not implemented; remote virtual-key deployments
+- Model configuration and credentials are durable; presence and recent usage
+  remain process-local.
+- Native TLS termination is not implemented; remote deployments
   require an HTTPS/WSS reverse proxy.

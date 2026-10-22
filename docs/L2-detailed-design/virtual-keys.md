@@ -1,9 +1,8 @@
 # Virtual keys
 
 Virtual-key mode adds durable key management and leased local inference
-authorization. It is opt-in; legacy mode retains the local `DAEMON_API_KEYS`
-list and the proof-of-concept management API. Never expose legacy management
-endpoints to an untrusted network.
+authorization. PostgreSQL, administrator authentication, and provisioned daemon
+credentials are required. There is no anonymous inference or management mode.
 
 ## Scope and contracts
 
@@ -138,7 +137,7 @@ model permission. With an unavailable policy, syntactically valid tokens get
 `GET /v1/models/{model_name}` enforces the same permission as chat completions.
 `/healthz` remains unauthenticated and reveals no secrets. Admission failures
 make no upstream call. Usage events gain a nullable `virtual_key_id` (never a
-secret/hash); legacy events have null. Rejected requests are recorded in
+secret/hash) on every event. Rejected requests are recorded in
 sanitized auth logs rather than invented upstream usage events.
 
 ## Distribution and bounded offline lease
@@ -186,17 +185,15 @@ daemon identities to credentials rather than trusting a claimed `daemon_id`.
 Hashes are not bearer secrets, but the control channel can change all access
 policies and must be trusted. Non-loopback inference clients need HTTPS.
 
-Use daemon `auth_mode = "virtual_keys"` as an opt-in rollout setting.
-Initially preserve legacy `DAEMON_API_KEYS` behavior in legacy mode. In
-virtual-key mode, never fall back to those static keys or anonymous access;
-reject startup if static keys are configured, to avoid ambiguous authorization.
+Virtual-key enforcement is unconditional. There is no authentication-mode switch,
+static client-key list, anonymous access, or upstream forwarding of client credentials.
 Model configuration updates and policy snapshots are separate: authorization
 always intersects the granted aliases with the currently configured models.
 
 Old daemons cannot enforce virtual policies: block enrolling them into a
 virtual-key deployment. Do not send unsupported variants and assume they are
-enforced. Roll out capabilities, then authenticated snapshot support, then the
-explicit auth mode; migrate apps before removing static keys.
+enforced. Every daemon must support authenticated snapshots and virtual-key
+enforcement before enrollment.
 
 ## Implementation acceptance criteria
 
@@ -211,7 +208,7 @@ explicit auth mode; migrate apps before removing static keys.
    duplicate IDs, rollback, and reconnect with no snapshot.
 5. Multi-instance tests cover durable revision ordering, mutation/refresh
    races, acknowledgements, and an empty snapshot that removes every key.
-6. Legacy mode remains unchanged; virtual-key mode cannot silently downgrade.
+6. Missing startup credentials fail explicitly; authorization cannot downgrade.
 7. Keep generated bindings synchronized with the live management contract;
    validate the Rust control messages against their schema and run router
    drift and integration tests.

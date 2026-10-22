@@ -5,15 +5,6 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::time::Instant;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, clap::ValueEnum)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum AuthMode {
-    #[default]
-    Legacy,
-    #[value(name = "virtual_keys")]
-    VirtualKeys,
-}
-
 #[derive(Default)]
 pub(crate) struct PolicyCache {
     snapshot: Option<VirtualKeyPolicySnapshot>,

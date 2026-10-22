@@ -23,38 +23,28 @@ const VIRTUAL_KEY_CAPABILITY: &str = "virtual-keys-v1";
 
 pub async fn ws_handler(
     State(state): State<AppState>,
-    identity: Option<Extension<AuthenticatedDaemon>>,
+    Extension(identity): Extension<AuthenticatedDaemon>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(socket, state, identity.map(|Extension(id)| id)))
+    ws.on_upgrade(move |socket| handle_socket(socket, state, identity))
         .into_response()
 }
 
-async fn credential_valid(state: &AppState, identity: Option<&AuthenticatedDaemon>) -> bool {
-    match (&state.virtual_key_mode, identity) {
-        (None, None) => true,
-        (Some(mode), Some(identity)) => match mode.store.daemon_credential_valid(identity).await {
-            Ok(valid) => valid,
-            Err(err) => {
-                warn!(error = %err, "failed to revalidate daemon credential; closing control channel");
-                false
-            }
-        },
-        _ => false,
+async fn credential_valid(state: &AppState, identity: &AuthenticatedDaemon) -> bool {
+    match state.access.store.daemon_credential_valid(identity).await {
+        Ok(valid) => valid,
+        Err(err) => {
+            warn!(error = %err, "failed to revalidate daemon credential; closing control channel");
+            false
+        }
     }
 }
 
-async fn handle_socket(
-    mut socket: WebSocket,
-    state: AppState,
-    identity: Option<AuthenticatedDaemon>,
-) {
-    if !credential_valid(&state, identity.as_ref()).await {
+async fn handle_socket(mut socket: WebSocket, state: AppState, identity: AuthenticatedDaemon) {
+    if !credential_valid(&state, &identity).await {
         return;
     }
-    let daemon_identity = identity
-        .as_ref()
-        .map(|identity| identity.daemon_id.as_str());
+    let daemon_identity = identity.daemon_id.as_str();
     let connection_id = Uuid::new_v4().to_string();
     info!(%connection_id, "Daemon connected via WebSocket");
 
@@ -62,7 +52,7 @@ async fn handle_socket(
 
     // Subscribe before reading state so updates cannot be lost during setup.
     let mut updates = state.broadcast.subscribe();
-    let mut registered = daemon_identity.is_none();
+    let mut registered = false;
     let mut latest_snapshot: Option<VirtualKeyPolicySnapshot> = None;
     let mut refresh = tokio::time::interval_at(
         tokio::time::Instant::now() + Duration::from_secs(60),
@@ -72,31 +62,21 @@ async fn handle_socket(
     let mut credential_check = tokio::time::interval(Duration::from_secs(5));
     credential_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-    if registered {
-        let initial = ControlMessage::from(state.store.config().await);
-        if send_control_message(&mut socket, &initial).await.is_err() {
-            state.store.daemon_disconnected(&connection_id).await;
-            return;
-        }
-    }
-
     loop {
         tokio::select! {
             incoming = socket.recv() => {
-                if !credential_valid(&state, identity.as_ref()).await {
+                if !credential_valid(&state, &identity).await {
                     break;
                 }
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<DaemonMessage>(&text) {
                             Ok(DaemonMessage::Registration(registration)) => {
-                                if let Some(expected_id) = daemon_identity {
-                                    if registration.daemon_id != expected_id
-                                        || !registration.capabilities.iter().any(|capability| capability == VIRTUAL_KEY_CAPABILITY)
-                                    {
-                                        warn!(%connection_id, "rejected virtual-key daemon registration");
-                                        break;
-                                    }
+                                if registration.daemon_id != daemon_identity
+                                    || !registration.capabilities.iter().any(|capability| capability == VIRTUAL_KEY_CAPABILITY)
+                                {
+                                    warn!(%connection_id, "rejected virtual-key daemon registration");
+                                    break;
                                 }
                                 state
                                     .store
@@ -108,35 +88,30 @@ async fn handle_socket(
                                     .await;
                                 if !registered {
                                     registered = true;
-                                    let config = match &state.virtual_key_mode {
-                                        Some(mode) => match mode.store.config().await {
-                                            Ok(config) => {
-                                                state.store.set_config(config.clone()).await;
-                                                config
-                                            }
-                                            Err(err) => {
-                                                warn!(%connection_id, error = %err, "could not load durable model configuration");
-                                                break;
-                                            }
-                                        },
-                                        None => state.store.config().await,
+                                    let config = match state.access.store.config().await {
+                                        Ok(config) => {
+                                            state.store.set_config(config.clone()).await;
+                                            config
+                                        }
+                                        Err(err) => {
+                                            warn!(%connection_id, error = %err, "could not load durable model configuration");
+                                            break;
+                                        }
                                     };
                                     let config = ControlMessage::from(config);
                                     if send_control_message(&mut socket, &config).await.is_err() {
                                         break;
                                     }
-                                    if let Some(mode) = &state.virtual_key_mode {
-                                        match mode.store.snapshot(now_ts()).await {
-                                            Ok(snapshot) => {
-                                                if send_policy_snapshot(&mut socket, &snapshot).await.is_err() {
-                                                    break;
-                                                }
-                                                latest_snapshot = Some(snapshot);
-                                            }
-                                            Err(err) => {
-                                                warn!(%connection_id, error = %err, "could not load initial virtual-key policy snapshot");
+                                    match state.access.store.snapshot(now_ts()).await {
+                                        Ok(snapshot) => {
+                                            if send_policy_snapshot(&mut socket, &snapshot).await.is_err() {
                                                 break;
                                             }
+                                            latest_snapshot = Some(snapshot);
+                                        }
+                                        Err(err) => {
+                                            warn!(%connection_id, error = %err, "could not load initial virtual-key policy snapshot");
+                                            break;
                                         }
                                     }
                                 }
@@ -145,16 +120,14 @@ async fn handle_socket(
                                 if !registered {
                                     continue;
                                 }
-                                if let Some(expected_id) = daemon_identity {
-                                    let claimed_id = match &message {
-                                        DaemonMessage::Heartbeat(heartbeat) => Some(heartbeat.daemon_id.as_str()),
-                                        DaemonMessage::Telemetry(telemetry) => Some(telemetry.daemon_id.as_str()),
-                                        DaemonMessage::Registration(_) | DaemonMessage::VirtualKeyPolicyAck(_) => None,
-                                    };
-                                    if claimed_id.is_some_and(|claimed_id| claimed_id != expected_id) {
-                                        warn!(%connection_id, "rejected daemon message with mismatched identity");
-                                        break;
-                                    }
+                                let claimed_id = match &message {
+                                    DaemonMessage::Heartbeat(heartbeat) => Some(heartbeat.daemon_id.as_str()),
+                                    DaemonMessage::Telemetry(telemetry) => Some(telemetry.daemon_id.as_str()),
+                                    DaemonMessage::Registration(_) | DaemonMessage::VirtualKeyPolicyAck(_) => None,
+                                };
+                                if claimed_id.is_some_and(|claimed_id| claimed_id != daemon_identity) {
+                                    warn!(%connection_id, "rejected daemon message with mismatched identity");
+                                    break;
                                 }
                                 if let DaemonMessage::VirtualKeyPolicyAck(ack) = &message {
                                     let is_current = ack.protocol_version == 1
@@ -180,13 +153,13 @@ async fn handle_socket(
                     _ => {}
                 }
             }
-            _ = credential_check.tick(), if identity.is_some() => {
-                if !credential_valid(&state, identity.as_ref()).await {
+            _ = credential_check.tick() => {
+                if !credential_valid(&state, &identity).await {
                     break;
                 }
             }
             update = updates.recv() => {
-                if !credential_valid(&state, identity.as_ref()).await {
+                if !credential_valid(&state, &identity).await {
                     break;
                 }
                 match update {
@@ -195,9 +168,6 @@ async fn handle_socket(
                             continue;
                         }
                         if let ControlMessage::VirtualKeyPolicySnapshot(snapshot) = &message {
-                            if state.virtual_key_mode.is_none() {
-                                continue;
-                            }
                             latest_snapshot = Some(snapshot.clone());
                         }
                         if send_control_message(&mut socket, &message).await.is_err() {
@@ -211,22 +181,20 @@ async fn handle_socket(
                 }
             }
             _ = refresh.tick() => {
-                if !credential_valid(&state, identity.as_ref()).await {
+                if !credential_valid(&state, &identity).await {
                     break;
                 }
                 if registered {
-                    if let Some(mode) = &state.virtual_key_mode {
-                        match mode.store.snapshot(now_ts()).await {
-                            Ok(snapshot) => {
-                                if send_policy_snapshot(&mut socket, &snapshot).await.is_err() {
-                                    break;
-                                }
-                                latest_snapshot = Some(snapshot);
-                            }
-                            Err(err) => {
-                                warn!(%connection_id, error = %err, "failed to refresh virtual-key policy snapshot");
+                    match state.access.store.snapshot(now_ts()).await {
+                        Ok(snapshot) => {
+                            if send_policy_snapshot(&mut socket, &snapshot).await.is_err() {
                                 break;
                             }
+                            latest_snapshot = Some(snapshot);
+                        }
+                        Err(err) => {
+                            warn!(%connection_id, error = %err, "failed to refresh virtual-key policy snapshot");
+                            break;
                         }
                     }
                 }

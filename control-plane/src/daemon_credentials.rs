@@ -6,7 +6,7 @@ use axum::{
 };
 use protocol::{DaemonCredential, DaemonCredentialList, IssuedDaemonCredential};
 use rand::{rngs::OsRng, RngCore};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 
@@ -37,12 +37,52 @@ fn credential(row: sqlx::postgres::PgRow) -> DaemonCredential {
     }
 }
 
+pub(crate) struct IssuedCredential {
+    credential: DaemonCredential,
+    token: String,
+}
+
+#[derive(Serialize)]
+struct DaemonConfig<'a> {
+    cp: &'a str,
+    daemon_id: &'a str,
+    control_token: &'a str,
+    listen_addr: &'a str,
+}
+
+fn issued_response(issued: IssuedCredential, cp: &str, status: StatusCode) -> Response {
+    let config = DaemonConfig {
+        cp,
+        daemon_id: &issued.credential.daemon_id,
+        control_token: &issued.token,
+        listen_addr: "127.0.0.1:9000",
+    };
+    match toml::to_string(&config) {
+        Ok(config_toml) => (
+            status,
+            Json(IssuedDaemonCredential {
+                credential: issued.credential,
+                token: issued.token,
+                config_toml,
+            }),
+        )
+            .into_response(),
+        Err(err) => {
+            tracing::error!(error = %err, "could not serialize provisioned daemon configuration");
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not generate daemon configuration; rotate this daemon credential to retry",
+            )
+        }
+    }
+}
+
 impl VirtualKeyStore {
     pub(crate) async fn create_daemon(
         &self,
         daemon_id: &str,
         now: i64,
-    ) -> anyhow::Result<Option<IssuedDaemonCredential>> {
+    ) -> anyhow::Result<Option<IssuedCredential>> {
         let token = new_token();
         let row = sqlx::query(
             "INSERT INTO daemon_credentials (daemon_id, token_sha256, created_at) \
@@ -54,7 +94,7 @@ impl VirtualKeyStore {
         .bind(now)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|row| IssuedDaemonCredential {
+        Ok(row.map(|row| IssuedCredential {
             credential: credential(row),
             token,
         }))
@@ -75,7 +115,7 @@ impl VirtualKeyStore {
         &self,
         daemon_id: &str,
         now: i64,
-    ) -> anyhow::Result<Option<IssuedDaemonCredential>> {
+    ) -> anyhow::Result<Option<IssuedCredential>> {
         let token = new_token();
         let row = sqlx::query(
             "UPDATE daemon_credentials SET token_sha256 = $2, rotated_at = $3, revoked_at = NULL \
@@ -86,7 +126,7 @@ impl VirtualKeyStore {
         .bind(now)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|row| IssuedDaemonCredential {
+        Ok(row.map(|row| IssuedCredential {
             credential: credential(row),
             token,
         }))
@@ -139,7 +179,7 @@ fn valid_daemon_id(id: &str) -> bool {
 fn unavailable() -> Response {
     error(
         StatusCode::SERVICE_UNAVAILABLE,
-        "daemon credential storage is unavailable; configure database_url and admin_token",
+        "daemon credential storage is unavailable",
     )
 }
 
@@ -152,9 +192,7 @@ pub(crate) async fn create(
     State(state): State<AppState>,
     payload: Result<Json<CreateParams>, JsonRejection>,
 ) -> Response {
-    let Some(mode) = &state.virtual_key_mode else {
-        return unavailable();
-    };
+    let mode = &state.access;
     let Json(params) = match payload {
         Ok(params) => params,
         Err(_) => {
@@ -171,7 +209,7 @@ pub(crate) async fn create(
         );
     }
     match mode.store.create_daemon(&params.daemon_id, now_ts()).await {
-        Ok(Some(issued)) => (StatusCode::CREATED, Json(issued)).into_response(),
+        Ok(Some(issued)) => issued_response(issued, &mode.control_plane_url, StatusCode::CREATED),
         Ok(None) => error(
             StatusCode::CONFLICT,
             "daemon_id already exists; rotate its credential instead",
@@ -181,9 +219,7 @@ pub(crate) async fn create(
 }
 
 pub(crate) async fn list(State(state): State<AppState>) -> Response {
-    let Some(mode) = &state.virtual_key_mode else {
-        return unavailable();
-    };
+    let mode = &state.access;
     match mode.store.daemon_credentials().await {
         Ok(items) => Json(DaemonCredentialList { items }).into_response(),
         Err(err) => storage_error(err),
@@ -191,20 +227,16 @@ pub(crate) async fn list(State(state): State<AppState>) -> Response {
 }
 
 pub(crate) async fn rotate(State(state): State<AppState>, Path(id): Path<String>) -> Response {
-    let Some(mode) = &state.virtual_key_mode else {
-        return unavailable();
-    };
+    let mode = &state.access;
     match mode.store.rotate_daemon(&id, now_ts()).await {
-        Ok(Some(issued)) => Json(issued).into_response(),
+        Ok(Some(issued)) => issued_response(issued, &mode.control_plane_url, StatusCode::OK),
         Ok(None) => error(StatusCode::NOT_FOUND, "daemon credential not found"),
         Err(err) => storage_error(err),
     }
 }
 
 pub(crate) async fn revoke(State(state): State<AppState>, Path(id): Path<String>) -> Response {
-    let Some(mode) = &state.virtual_key_mode else {
-        return unavailable();
-    };
+    let mode = &state.access;
     match mode.store.revoke_daemon(&id, now_ts()).await {
         Ok(Some(credential)) => Json(credential).into_response(),
         Ok(None) => error(StatusCode::NOT_FOUND, "daemon credential not found"),
@@ -277,10 +309,11 @@ mod tests {
             store: Arc::new(crate::store::MemoryStore::new(initial)),
             broadcast,
             started_at: now_ts(),
-            virtual_key_mode: Some(Arc::new(crate::VirtualKeyMode {
+            access: Arc::new(crate::AccessControl {
                 store: store.clone(),
                 admin_token: Arc::new("test-admin-token".into()),
-            })),
+                control_plane_url: "wss://control.example/control".into(),
+            }),
         };
         let app = crate::api::create_app(state.clone(), vec![]);
         let id = format!("daemon-test-{}", uuid::Uuid::new_v4().simple());
@@ -310,6 +343,12 @@ mod tests {
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(created["credential"]["daemon_id"], id);
         let token = created["token"].as_str().unwrap();
+        let config: toml::Value = toml::from_str(created["config_toml"].as_str().unwrap()).unwrap();
+        assert_eq!(config["cp"].as_str(), Some("wss://control.example/control"));
+        assert_eq!(config["daemon_id"].as_str(), Some(id.as_str()));
+        assert_eq!(config["control_token"].as_str(), Some(token));
+        assert_eq!(config["listen_addr"].as_str(), Some("127.0.0.1:9000"));
+        assert!(config.get("auth_mode").is_none());
         assert_eq!(token.len(), 68);
         let identity = AuthenticatedDaemon {
             daemon_id: id.clone(),
@@ -386,10 +425,11 @@ mod tests {
             assert!(message.is_text());
         }
         let mut second_state = state.clone();
-        second_state.virtual_key_mode = Some(Arc::new(crate::VirtualKeyMode {
+        second_state.access = Arc::new(crate::AccessControl {
             store: second.clone(),
             admin_token: Arc::new("test-admin-token".into()),
-        }));
+            control_plane_url: "wss://control.example/control".into(),
+        });
         let app = crate::api::create_app(second_state, vec![]);
         let (status, rotated) = call(
             &app,
@@ -401,6 +441,8 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let replacement = rotated["token"].as_str().unwrap();
+        let config: toml::Value = toml::from_str(rotated["config_toml"].as_str().unwrap()).unwrap();
+        assert_eq!(config["control_token"].as_str(), Some(replacement));
         assert_ne!(replacement, token);
         assert!(!second.daemon_credential_valid(&identity).await.unwrap());
         let replacement_identity = AuthenticatedDaemon {

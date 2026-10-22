@@ -53,8 +53,8 @@ pub struct UsageEvent {
 are then zero because they are unknown, not because they are zero.
 */
     pub usage_reported: bool,
-    ///Non-secret virtual key ID; null for legacy inference.
-    pub virtual_key_id: Option<String>,
+    ///Non-secret virtual key ID used to authorize the request.
+    pub virtual_key_id: String,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModelConfigSet {
@@ -109,6 +109,11 @@ pub struct KeyInfoResponse {
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct IssuedDaemonCredential {
+    /**One-time standalone daemon configuration, ready to save as config.toml.
+Includes cp from control_plane.websocket_url, daemon_id, control_token,
+and a loopback listener. Contains the bearer secret; never log it.
+*/
+    pub config_toml: String,
     pub credential: DaemonCredential,
     ///One-time plaintext control-channel token. Never log it.
     pub token: String,

@@ -68,7 +68,7 @@ fn metadata(key: &VirtualKey, hash: &str) -> anyhow::Result<Value> {
 fn unavailable() -> Response {
     error(
         StatusCode::SERVICE_UNAVAILABLE,
-        "virtual-key mode or storage is unavailable",
+        "virtual-key storage is unavailable",
     )
 }
 
@@ -76,9 +76,7 @@ pub(crate) async fn generate(
     State(state): State<AppState>,
     payload: Result<Json<GenerateParams>, JsonRejection>,
 ) -> Response {
-    let Some(mode) = &state.virtual_key_mode else {
-        return unavailable();
-    };
+    let mode = &state.access;
     let Json(params) = match payload {
         Ok(params) => params,
         Err(_) => {
@@ -148,9 +146,7 @@ pub(crate) async fn info(
     State(state): State<AppState>,
     params: Result<Query<InfoParams>, QueryRejection>,
 ) -> Response {
-    let Some(mode) = &state.virtual_key_mode else {
-        return unavailable();
-    };
+    let mode = &state.access;
     let Query(params) = match params {
         Ok(params) => params,
         Err(_) => {
@@ -192,9 +188,7 @@ pub(crate) async fn list(
     State(state): State<AppState>,
     params: Result<Query<ListParams>, QueryRejection>,
 ) -> Response {
-    let Some(mode) = &state.virtual_key_mode else {
-        return unavailable();
-    };
+    let mode = &state.access;
     let Query(params) = match params {
         Ok(params) => params,
         Err(_) => {
@@ -254,9 +248,7 @@ pub(crate) async fn delete(
     State(state): State<AppState>,
     payload: Result<Json<DeleteParams>, JsonRejection>,
 ) -> Response {
-    let Some(mode) = &state.virtual_key_mode else {
-        return unavailable();
-    };
+    let mode = &state.access;
     let Json(params) = match payload {
         Ok(params) => params,
         Err(_) => {
@@ -347,10 +339,11 @@ mod tests {
             )),
             broadcast,
             started_at: now_ts(),
-            virtual_key_mode: Some(Arc::new(crate::VirtualKeyMode {
+            access: Arc::new(crate::AccessControl {
                 store: store.clone(),
                 admin_token: Arc::new("test-admin-token".into()),
-            })),
+                control_plane_url: "wss://control.example/control".into(),
+            }),
         };
         let app = crate::api::create_app(state, vec![]);
         let request = |method: &str, path: &str, payload: Value| {

@@ -111,7 +111,7 @@ fn trim_ascii(data: &[u8]) -> &[u8] {
 
 /// Everything needed to describe one upstream call to the control plane.
 pub(crate) struct RequestContext {
-    pub(crate) virtual_key_id: Option<String>,
+    pub(crate) virtual_key_id: String,
     pub(crate) daemon_id: String,
     pub(crate) model_name: String,
     pub(crate) request_id: String,
@@ -260,13 +260,6 @@ pub(crate) fn enable_stream_usage(payload: &mut Value, model: &ModelConfig) {
     if let Some(options) = options.as_object_mut() {
         options.insert("include_usage".to_string(), Value::Bool(true));
     }
-}
-
-pub(crate) fn configured_api_key(parameters: &ModelConfigParameters) -> Option<String> {
-    parameters
-        .get("api_key_env")
-        .and_then(|name| std::env::var(name).ok())
-        .or_else(|| parameters.get("api_key").cloned())
 }
 
 #[cfg(test)]

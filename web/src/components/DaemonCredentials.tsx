@@ -8,19 +8,39 @@ import { Card } from "./Card";
 
 interface Props {
   credentials: DaemonCredential[];
-  unavailable: string | null;
   ready: boolean;
   onChanged: () => Promise<void>;
 }
 
-export function DaemonCredentials({ credentials, unavailable, ready, onChanged }: Props) {
+export function DaemonCredentials({ credentials, ready, onChanged }: Props) {
   const [daemonId, setDaemonId] = useState("");
   const [issued, setIssued] = useState<IssuedDaemonCredential | null>(null);
   const [confirmation, setConfirmation] = useState<{ id: string; action: "rotate" | "revoke" } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const disabled = busy || !ready || unavailable !== null;
+  const disabled = busy || !ready;
+
+  function downloadConfig() {
+    if (!issued) return;
+    setError(null);
+    try {
+      const blob = new Blob([issued.config_toml], { type: "application/toml;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "config.toml";
+      document.body.appendChild(link);
+      try {
+        link.click();
+      } finally {
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+    } catch (cause) {
+      setError(`Configuration download failed: ${cause instanceof Error ? cause.message : "unknown error"}`);
+    }
+  }
 
   async function perform(action: "create" | "rotate" | "revoke", id: string) {
     setBusy(true);
@@ -46,8 +66,7 @@ export function DaemonCredentials({ credentials, unavailable, ready, onChanged }
   }
 
   return (
-    <Card title="Daemon credentials" hint="Provision daemons before starting oneflowd. Tokens are shown once.">
-      {unavailable ? <p role="alert" className="mb-3 text-sm text-amber-300">{unavailable}</p> : null}
+    <Card title="Daemon credentials" hint="Create a daemon and download its one-time configuration.">
       <form className="mb-4 flex flex-wrap items-center gap-3 text-sm" onSubmit={(event) => {
         event.preventDefault();
         void perform("create", daemonId);
@@ -64,14 +83,15 @@ export function DaemonCredentials({ credentials, unavailable, ready, onChanged }
       {notice ? <p role="status" className="mb-3 text-sm text-emerald-300">{notice}</p> : null}
       {issued ? (
         <section className="mb-4 rounded border border-amber-700 bg-slate-900 p-4 text-sm text-slate-200">
-          <p className="mb-2">Save this token now for <strong>{issued.credential.daemon_id}</strong>. It cannot be retrieved again.</p>
+          <p className="mb-2">Download the configuration now for <strong>{issued.credential.daemon_id}</strong>. It contains a secret token and cannot be retrieved again.</p>
+          <button type="button" onClick={downloadConfig}
+            className="mb-3 rounded bg-sky-700 px-3 py-2 text-white">Download config.toml</button>
           <label htmlFor="issued-daemon-token">One-time daemon token</label>
           <input id="issued-daemon-token" readOnly autoComplete="off" spellCheck={false}
             value={issued.token} onFocus={(event) => event.target.select()}
             className="my-2 block w-full rounded border border-slate-700 bg-slate-950 p-2 font-mono" />
-          <p>On the daemon host, set <code>ONEFLOW_DAEMON_TOKEN</code> to this token. Configure:</p>
-          <pre className="my-2 overflow-x-auto">{`daemon_id = "${issued.credential.daemon_id}"\nauth_mode = "virtual_keys"`}</pre>
-          <p>Set <code>cp</code> to your control-plane WebSocket URL, then run <code>oneflowd -c /path/to/daemon.toml</code>.</p>
+          <p>The file includes the control-plane URL, daemon ID, and token. Transfer it securely to the daemon host, restrict access with <code>chmod 600 config.toml</code>, then run <code>oneflowd -c config.toml</code>.</p>
+          <p className="mt-2">An existing <code>ONEFLOW_DAEMON_TOKEN</code> overrides the downloaded token; unset it when using this file.</p>
           <button type="button" onClick={() => setIssued(null)}
             className="mt-3 rounded bg-slate-700 px-3 py-2">Dismiss token</button>
         </section>
@@ -112,7 +132,7 @@ export function DaemonCredentials({ credentials, unavailable, ready, onChanged }
           ))}</tbody>
         </table>
       </div>
-      {ready && !unavailable && credentials.length === 0 ? <p className="mt-3 text-sm text-slate-400">No daemon credentials provisioned yet.</p> : null}
+      {ready && credentials.length === 0 ? <p className="mt-3 text-sm text-slate-400">No daemon credentials provisioned yet.</p> : null}
     </Card>
   );
 }
