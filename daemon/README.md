@@ -36,6 +36,12 @@ with `--listen-addr`, `DAEMON_LISTEN_ADDR`, or `listen_addr` in the config.
 See [`config.example.toml`](./config.example.toml) for the available daemon
 settings and their defaults.
 
+Logs are written to standard error (usually visible in the terminal where
+`oneflowd` is running, or through the service manager when run as a service).
+Startup logs include the daemon ID, control-plane URL, and bound listener
+address. Connection-state logs show connecting, connected, registered, and
+reconnecting states. Set `RUST_LOG=oneflowd=debug` for more detail.
+
 `DAEMON_API_KEYS` optionally sets comma-separated client API keys.
 `DAEMON_ID`, `DAEMON_LISTEN_ADDR`, `UPSTREAM_CONNECT_TIMEOUT_MS`,
 `UPSTREAM_READ_TIMEOUT_MS`, `UPSTREAM_REQUEST_TIMEOUT_MS`, and

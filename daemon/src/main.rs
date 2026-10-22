@@ -400,7 +400,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "daemon=info".into()),
+                .unwrap_or_else(|_| "oneflowd=info".into()),
         )
         .init();
 
@@ -425,6 +425,13 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(listen_addr).await?;
     let bound_addr = listener.local_addr()?;
 
+    info!(
+        state = "starting",
+        daemon_id = %state.settings.daemon_id,
+        control_plane_url = %control_plane_url,
+        listen_addr = %bound_addr,
+        "starting oneflowd"
+    );
     tokio::spawn(run_control_channel(
         control_plane_url,
         cluster_name,
@@ -446,9 +453,10 @@ async fn run_control_channel(
     mut telemetry_rx: mpsc::Receiver<DaemonMessage>,
 ) {
     loop {
+        info!(state = "connecting", url = %control_plane_url, "connecting to control plane");
         match connect_async(&control_plane_url).await {
             Ok((mut socket, _)) => {
-                info!(url = %control_plane_url, "connected to control plane");
+                info!(state = "connected", url = %control_plane_url, "connected to control plane");
                 let registration = DaemonMessage::Registration(Registration {
                     daemon_id: state.settings.daemon_id.clone(),
                     cluster_name: cluster_name.clone(),
@@ -461,6 +469,11 @@ async fn run_control_channel(
                     .await
                     .is_ok()
                 {
+                    info!(
+                        state = "registered",
+                        daemon_id = %state.settings.daemon_id,
+                        "registered with control plane"
+                    );
                     let mut heartbeat_interval = time::interval(Duration::from_secs(5));
                     heartbeat_interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
 
@@ -501,11 +514,23 @@ async fn run_control_channel(
                             }
                         }
                     }
+                } else {
+                    warn!("failed to register with control plane");
                 }
-                warn!("control plane connection closed");
+                warn!(
+                    state = "reconnecting",
+                    retry_in_secs = 5,
+                    "control plane connection closed"
+                );
             }
             Err(err) => {
-                warn!(url = %control_plane_url, error = %err, "control plane connection failed")
+                warn!(
+                    state = "reconnecting",
+                    url = %control_plane_url,
+                    retry_in_secs = 5,
+                    error = %err,
+                    "control plane connection failed"
+                )
             }
         }
 
