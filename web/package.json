@@ -1,5 +1,5 @@
 {
-  "name": "llm-control-plane-dashboard",
+  "name": "oneflow-dashboard",
   "private": true,
   "version": "0.1.0",
   "type": "module",

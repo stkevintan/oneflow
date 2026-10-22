@@ -5,14 +5,14 @@ control-plane/web configuration or depend on the `config-provider` crate.
 Build it from the repository root:
 
 ```sh
-cargo build --release -p daemon
+cargo build --release -p oneflowd
 ```
 
-Copy `target/release/daemon` and its standalone `config.toml` to the remote
+Copy `target/release/oneflowd` and its standalone `config.toml` to the remote
 machine, then start it from that config's directory:
 
 ```sh
-./daemon
+./oneflowd
 ```
 
 The daemon automatically reads `./config.toml` when present. The daemon's

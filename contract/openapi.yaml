@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: LLM Control Plane API
+  title: Oneflow API
   version: 1.0.0
   description: |
     Source-of-truth contract for the control-plane management API.

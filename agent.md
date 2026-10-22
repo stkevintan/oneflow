@@ -138,8 +138,8 @@ cd web && npm install && npm run dev       # http://127.0.0.1:5173/
 cd web && npm run build && npm run preview # production bundle, same address
 
 # Daemon
-cargo build --release -p daemon            # target/release/daemon
-target/release/daemon --config daemon/config.example.toml
+cargo build --release -p oneflowd         # target/release/oneflowd
+target/release/oneflowd --config daemon/config.example.toml
 
 # Checks
 cargo test --workspace                     # contract drift guard

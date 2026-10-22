@@ -31,7 +31,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 120_000;
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Parser)]
-#[command(about = "Standalone LLM control-plane daemon")]
+#[command(about = "Oneflow standalone inference daemon")]
 struct Args {
     /// Control-plane WebSocket endpoint, reachable from this daemon host.
     #[arg(long, value_name = "URL")]

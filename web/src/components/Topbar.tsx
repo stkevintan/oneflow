@@ -24,7 +24,7 @@ export function Topbar({ server, connection, onRefresh }: TopbarProps) {
   return (
     <header className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 border-b border-slate-800 bg-slate-900 px-7 py-4">
       <div>
-        <h1 className="text-lg font-semibold tracking-tight text-slate-100">LLM Control Plane</h1>
+        <h1 className="text-lg font-semibold tracking-tight text-slate-100">Oneflow</h1>
         <p className="mt-0.5 text-sm text-slate-400">{summary}</p>
       </div>
       <div className="flex items-center gap-3">

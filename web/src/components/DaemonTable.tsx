@@ -89,7 +89,7 @@ export function DaemonTable({ daemons }: DaemonTableProps) {
         </table>
       </div>
       <EmptyState visible={daemons.length === 0}>
-        No daemons connected yet. Start one with <code className="text-slate-400">cargo run -p daemon</code>.
+        No daemons connected yet. Start one with <code className="text-slate-400">cargo run -p oneflowd</code>.
       </EmptyState>
     </>
   );

@@ -1,4 +1,4 @@
-# LLM Control Plane
+# Oneflow
 
 A Rust-based control plane and standalone inference gateway for centrally
 managing model configuration across clusters. Operators update configuration
@@ -60,13 +60,13 @@ Requirements: Rust toolchain and Node.js/npm.
    repository root with its standalone example config:
 
    ```sh
-   cargo run -p daemon -- --config daemon/config.example.toml
+   cargo run -p oneflowd -- --config daemon/config.example.toml
    ```
 
    The daemon is a separate binary and reads its own top-level settings from
    `config.toml` in its working directory, or from `--config PATH`. CLI options
    override environment variables, which override TOML values. For example,
-   `cargo run -p daemon -- --cp ws://127.0.0.1:4000/control --listen-addr 127.0.0.1:9000`.
+   `cargo run -p oneflowd -- --cp ws://127.0.0.1:4000/control --listen-addr 127.0.0.1:9000`.
    The API listens on `127.0.0.1` at an OS-selected port by default and logs
    the selected address. Configure the model's provider URL and credentials in
    the model configuration; the daemon supports environment-backed provider
