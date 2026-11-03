@@ -153,11 +153,25 @@ tokens to daemon hosts.
 
 ## 4. Issue a key for the app
 
+In the web dashboard, apply the administrator token and click the daemon ID
+in **Connected daemons** or **Daemon credentials**. On its detail page, use
+**Consumer virtual keys**: enter a consumer name, choose allowed model aliases,
+optionally set an expiry, then click **Create virtual key**. Copy the one-time
+key before leaving the page. The key authorizes that daemon's proxied inference
+endpoint, not its control channel or the upstream provider API.
+
+The page lists only keys bound to that daemon, including expired keys, with
+pagination and confirmed revocation. Offline daemon keys can still be managed;
+new keys require an active provisioned daemon credential. Model selection is a
+permission restriction on the consumer credential, not a provider API key.
+
+Equivalent API request:
+
 ```sh
 curl --fail-with-body http://127.0.0.1:4000/key/generate \
   -H "Authorization: Bearer $ONEFLOW_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"key_alias":"external-app","models":["my-model"],"duration":"30d"}'
+  -d '{"daemon_id":"server-a","key_alias":"external-app","models":["my-model"],"duration":"30d"}'
 ```
 
 The 200 response contains `{ "key": "sk-...", "token": "<sha256>", ...metadata }`.
@@ -167,6 +181,12 @@ null means no expiry. Responses use `expires` as an RFC 3339 UTC timestamp.
 All allowlist names must exist when creating the key; wildcards and empty lists
 are rejected.
 Creation does not guarantee that every daemon has received its policy yet.
+`daemon_id` binds the key to that provisioned daemon. Another daemon rejects
+the same key even if it serves the same model aliases. Omitting/null `daemon_id`
+preserves unbound cross-daemon access; existing keys are not silently rebound.
+Upgrade the control plane and all daemons before issuing daemon-bound keys:
+older daemons reject snapshots with this scope field and eventually fail closed
+when their previous lease expires.
 
 Configure the external app:
 
@@ -180,7 +200,7 @@ A virtual key must never be used as an administrator or provider credential.
 ## 5. List, inspect, and revoke
 
 ```sh
-curl --fail-with-body 'http://127.0.0.1:4000/key/list?page=1&size=10&return_full_object=true' \
+curl --fail-with-body 'http://127.0.0.1:4000/key/list?page=1&size=10&return_full_object=true&daemon_id=server-a' \
   -H "Authorization: Bearer $ONEFLOW_ADMIN_TOKEN"
 
 curl --fail-with-body "http://127.0.0.1:4000/key/info?key=$KEY_HASH" \
@@ -194,6 +214,8 @@ curl --fail-with-body http://127.0.0.1:4000/key/delete \
 
 `KEY_HASH` is the `token` hash returned during generation or listing, not
 the internal `token_id`. Metadata responses never return a bearer secret.
+The optional `daemon_id` list filter applies before pagination and counting,
+and excludes unbound keys. Omit it to list all keys.
 Deletion is permanent and idempotent. Rotate by creating a new key, updating the client,
 then deleting the previous one. Deleted metadata remains available through
 `/key/info`, but is omitted from `/key/list`. Batch deletion is atomic:
@@ -210,6 +232,8 @@ a supported subset, not a drop-in replacement for every LiteLLM management API:
 - `key_alias`, `models`, and optional `duration` are accepted on generation.
   Explicit non-empty model lists are required; unlike LiteLLM, empty or
   omitted models never grant all-model access.
+- Oneflow's optional `daemon_id` extension binds a consumer key to a daemon;
+  it is returned in metadata and is supported as a list filter.
 - `/key/list` uses page/size pagination and returns hashes by default, or
   metadata objects with `return_full_object=true`. Expired non-deleted keys
   remain listed. Unsupported filters are rejected.

@@ -124,6 +124,8 @@ pub struct GenerateKeyResponse {
     pub blocked: bool,
     ///RFC 3339 UTC timestamp.
     pub created_at: String,
+    ///Bound daemon ID, or null for an unbound cross-daemon key.
+    pub daemon_id: Option<String>,
     ///RFC 3339 UTC timestamp or null.
     pub expires: Option<String>,
     ///One-time plaintext key; starts with sk-. Never log it.
@@ -141,6 +143,8 @@ pub struct KeyMetadata {
     pub blocked: bool,
     ///RFC 3339 UTC timestamp.
     pub created_at: String,
+    ///Bound daemon ID, or null for an unbound cross-daemon key.
+    pub daemon_id: Option<String>,
     ///RFC 3339 UTC timestamp or null.
     pub expires: Option<String>,
     pub key_alias: String,
@@ -221,6 +225,14 @@ fields (budgets, rate limits, metadata, user/team IDs) return 400.
 */
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GenerateKeyRequest {
+    ///Oneflow extension. Bind the consumer key to an active provisioned daemon. Omitted/null preserves unbound cross-daemon access.
+    ///Constraint: minLength=1, maxLength=128, pattern=`^[A-Za-z0-9._-]+$`
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "tri_state_serde::deserialize"
+    )]
+    pub daemon_id: Option<Option<String>>,
     ///Positive duration (for example 30d); omitted/null means no key expiry.
     ///Constraint: pattern=`^[0-9]+[smhd]$`
     #[serde(
@@ -245,6 +257,7 @@ impl GenerateKeyRequest {
     pub fn new(models: Vec<String>) -> Self {
         Self {
             models,
+            daemon_id: None,
             duration: None,
             key_alias: None,
         }
@@ -266,6 +279,28 @@ impl GenerateKeyRequestBuilder {
         Self {
             value: GenerateKeyRequest::new(models),
         }
+    }
+    #[doc = concat!(
+        "Set the optional nullable `", "daemon_id", "` request field to a value."
+    )]
+    #[must_use]
+    pub fn daemon_id(mut self, daemon_id: String) -> Self {
+        self.value.daemon_id = Some(Some(daemon_id));
+        self
+    }
+    #[doc = concat!(
+        "Set the optional nullable `", "daemon_id", "` request field to JSON null."
+    )]
+    #[must_use]
+    pub fn daemon_id_null(mut self) -> Self {
+        self.value.daemon_id = Some(None);
+        self
+    }
+    #[doc = concat!("Omit the optional nullable `", "daemon_id", "` request field.")]
+    #[must_use]
+    pub fn daemon_id_absent(mut self) -> Self {
+        self.value.daemon_id = None;
+        self
     }
     #[doc = concat!(
         "Set the optional nullable `", "duration", "` request field to a value."

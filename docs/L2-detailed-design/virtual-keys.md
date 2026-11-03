@@ -93,6 +93,25 @@ snapshot. Concurrent insertion/deletion can shift later pages; the listing is
 not a stable export. Deleted keys are excluded but retained for info/audit.
 Invalid pagination and unsupported filters return 400.
 
+## Consumer identity and daemon binding
+
+A virtual key identifies a consumer of a daemon's proxied endpoint; it is never
+the provider API key. `POST /key/generate` accepts Oneflow's optional
+`daemon_id` extension. A non-null ID must identify an active provisioned daemon.
+The binding is persisted with the key and included in metadata and policy
+snapshots. Every protected daemon route compares it against the daemon's own
+configured identity before admitting requests; a mismatch returns 401.
+
+`GET /key/list?daemon_id=...` filters rows and counts before pagination and
+excludes unbound keys. Omitted/null generation binding keeps existing
+cross-daemon semantics; existing keys are not automatically rebound.
+The web daemon detail page always creates bound keys, shows their metadata,
+and confirms revocation. Model allowlists further restrict consumer access.
+
+Upgrade control plane and daemons together before creating bound keys. Older
+daemons reject the additional policy field rather than ignoring its
+restriction; their previous policy lease still expires normally.
+
 ## Model permissions and inference errors
 
 `allowed_models` is a non-empty list of exact public model names. Reject blank
@@ -179,8 +198,10 @@ application. A connected-but-stale daemon is also fenced by its lease.
 
 ## Deployment prerequisites and compatibility
 
-Require administrator authentication for the management API and authenticated,
-encrypted daemon control connections before distributing key policies. Bind
+Require administrator authentication for the management API and authenticated
+daemon control connections before distributing key policies. TLS is optional,
+including remote connections; use encrypted transport on untrusted networks.
+Plaintext connections expose credentials and policies to observers. Bind
 daemon identities to credentials rather than trusting a claimed `daemon_id`.
 Hashes are not bearer secrets, but the control channel can change all access
 policies and must be trusted. Non-loopback inference clients need HTTPS.

@@ -387,6 +387,13 @@ paths:
           schema:
             type: boolean
             default: false
+        - name: daemon_id
+          in: query
+          description: Only keys bound to this daemon; excludes unbound keys.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
       responses:
         "200":
           description: Hash identifiers by default; metadata objects when return_full_object=true
@@ -518,6 +525,12 @@ components:
         LiteLLM, empty/omitted models do NOT grant all-model access. Unsupported
         fields (budgets, rate limits, metadata, user/team IDs) return 400.
       properties:
+        daemon_id:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9._-]+$"
+          description: Oneflow extension. Bind the consumer key to an active provisioned daemon. Omitted/null preserves unbound cross-daemon access.
         key_alias:
           type: [string, "null"]
           minLength: 1
@@ -537,8 +550,11 @@ components:
           description: Positive duration (for example 30d); omitted/null means no key expiry.
     KeyMetadata:
       type: object
-      required: [token, token_id, key_alias, models, expires, created_at, blocked]
+      required: [token, token_id, key_alias, models, expires, created_at, blocked, daemon_id]
       properties:
+        daemon_id:
+          type: [string, "null"]
+          description: Bound daemon ID, or null for an unbound cross-daemon key.
         token:
           type: string
           description: SHA-256 identifier, not a usable inference credential.

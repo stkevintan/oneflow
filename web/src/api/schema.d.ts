@@ -298,6 +298,8 @@ export interface components {
          *     fields (budgets, rate limits, metadata, user/team IDs) return 400.
          */
         GenerateKeyRequest: {
+            /** @description Oneflow extension. Bind the consumer key to an active provisioned daemon. Omitted/null preserves unbound cross-daemon access. */
+            daemon_id?: string | null;
             /** @description Optional display label; generated when omitted or null. */
             key_alias?: string | null;
             models: string[];
@@ -305,6 +307,8 @@ export interface components {
             duration?: string | null;
         };
         KeyMetadata: {
+            /** @description Bound daemon ID, or null for an unbound cross-daemon key. */
+            daemon_id: string | null;
             /** @description SHA-256 identifier, not a usable inference credential. */
             token: string;
             /** @description Oneflow internal key ID, also used in telemetry. */
@@ -858,6 +862,8 @@ export interface operations {
                 page?: number;
                 size?: number;
                 return_full_object?: boolean;
+                /** @description Only keys bound to this daemon; excludes unbound keys. */
+                daemon_id?: string;
             };
             header?: never;
             path?: never;
