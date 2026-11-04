@@ -205,7 +205,7 @@ async fn get_config(State(state): State<AppState>) -> Response {
             );
         }
     };
-    Json(config).into_response()
+    Json(crate::config_secrets::redact(config)).into_response()
 }
 
 async fn put_config(
@@ -220,13 +220,16 @@ async fn put_config(
         return error(StatusCode::BAD_REQUEST, message);
     }
 
-    if let Err(err) = state.access.store.set_config(&config).await {
-        tracing::error!(error = %err, "failed to persist durable model configuration");
-        return error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "durable configuration is unavailable",
-        );
-    }
+    let config = match state.access.store.replace_config(config).await {
+        Ok(config) => config,
+        Err(err) => {
+            tracing::error!(error = %err, "failed to persist durable model configuration");
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "durable configuration is unavailable",
+            );
+        }
+    };
     state.store.set_config(config.clone()).await;
 
     let receivers = state
@@ -240,7 +243,7 @@ async fn put_config(
         "broadcasted configuration update"
     );
 
-    Json(config).into_response()
+    Json(crate::config_secrets::redact(config)).into_response()
 }
 
 fn validate_config(config: &ModelConfigSet) -> Result<(), String> {
@@ -368,6 +371,13 @@ mod contract_tests {
     /// A router whose store holds one registered daemon with one usage event,
     /// so every collection and nested schema is exercised with real data.
     async fn seeded_app(cors: Vec<HeaderValue>) -> Router {
+        seeded_app_with_broadcast(cors).await.0
+    }
+
+    /// As [`seeded_app`], also returning a receiver for what daemons are sent.
+    async fn seeded_app_with_broadcast(
+        cors: Vec<HeaderValue>,
+    ) -> (Router, broadcast::Receiver<ControlMessage>) {
         let store = Arc::new(MemoryStore::new(default_config()));
         store.daemon_connected(CONNECTION_ID, 1).await;
         store
@@ -405,7 +415,7 @@ mod contract_tests {
                 .await;
         }
 
-        let (broadcast, _) = broadcast::channel(8);
+        let (broadcast, receiver) = broadcast::channel(8);
         let key_store = match std::env::var("ONEFLOW_TEST_DATABASE_URL") {
             Ok(url) => crate::virtual_keys::VirtualKeyStore::connect(&url, &default_config())
                 .await
@@ -417,7 +427,7 @@ mod contract_tests {
                     .unwrap(),
             },
         };
-        create_app(
+        let app = create_app(
             AppState {
                 store,
                 broadcast,
@@ -429,7 +439,8 @@ mod contract_tests {
                 }),
             },
             cors,
-        )
+        );
+        (app, receiver)
     }
 
     async fn app() -> Router {
@@ -547,6 +558,7 @@ mod contract_tests {
             eprintln!("Skipping database-backed response contracts: set ONEFLOW_TEST_DATABASE_URL");
             return;
         }
+        let _config_lock = crate::SHARED_CONFIG_TEST_LOCK.lock().await;
         let contract = contract();
         let app = app().await;
         let (_, config) = call(app.clone(), "get", "/v1/config", None).await;
@@ -594,6 +606,7 @@ mod contract_tests {
             eprintln!("Skipping durable config test: set ONEFLOW_TEST_DATABASE_URL");
             return;
         }
+        let _config_lock = crate::SHARED_CONFIG_TEST_LOCK.lock().await;
         let app = app().await;
         let payload = json!({
             "version": "contract-test",
@@ -618,6 +631,85 @@ mod contract_tests {
         let (_, status) = call(app, "get", "/v1/status", None).await;
         assert_eq!(status["config_version"], "contract-test");
         assert_eq!(status["connected_daemons"], 1);
+    }
+
+    /// The literal provider key is never returned by the management API, an
+    /// operator can round-trip a GET body without losing it, and daemons still
+    /// receive it on the control channel.
+    #[tokio::test]
+    async fn provider_api_key_is_write_only_but_reaches_daemons() {
+        if std::env::var_os("ONEFLOW_TEST_DATABASE_URL").is_none() {
+            eprintln!("Skipping provider key test: set ONEFLOW_TEST_DATABASE_URL");
+            return;
+        }
+        let _config_lock = crate::SHARED_CONFIG_TEST_LOCK.lock().await;
+        const SECRET: &str = "sk-provider-write-only-test";
+        let (app, mut daemons) = seeded_app_with_broadcast(Vec::new()).await;
+        let model = |name: &str, parameters: Value| {
+            json!({
+                "model_name": name,
+                "provider": "custom_openai",
+                "api_base": "https://example.test/v1",
+                "parameters": parameters,
+            })
+        };
+        let broadcast_key = |message: ControlMessage, name: &str| match message {
+            ControlMessage::ConfigUpdate { models, .. } => models
+                .into_iter()
+                .find(|model| model.model_name == name)
+                .and_then(|model| model.parameters.get("api_key").cloned()),
+            other => panic!("expected ConfigUpdate, got {other:?}"),
+        };
+
+        // Write a key, plus a client-sent `api_key_configured` that must be ignored.
+        let mut keyed = model("keyed", json!({ "api_key": SECRET, "upstream_model": "u" }));
+        keyed["api_key_configured"] = json!(false);
+        let body = json!({
+            "version": "secret-v1",
+            "models": [keyed, model("plain", json!({}))],
+        });
+        let (status, put) = call(app.clone(), "put", "/v1/config", Some(&body.to_string())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!put.to_string().contains(SECRET), "PUT echoed the key");
+        assert_eq!(put["models"][0]["api_key_configured"], true);
+        assert_eq!(put["models"][1]["api_key_configured"], false);
+        assert_eq!(
+            broadcast_key(daemons.recv().await.unwrap(), "keyed").as_deref(),
+            Some(SECRET)
+        );
+
+        // GET never returns the key.
+        let (_, got) = call(app.clone(), "get", "/v1/config", None).await;
+        assert!(!got.to_string().contains(SECRET), "GET returned the key");
+        assert!(got["models"][0]["parameters"].get("api_key").is_none());
+        assert_eq!(got["models"][0]["parameters"]["upstream_model"], "u");
+        assert_eq!(got["models"][0]["api_key_configured"], true);
+
+        // Sending the GET body back keeps the key for daemons.
+        let mut round_trip = got.clone();
+        round_trip["version"] = json!("secret-v2");
+        let (status, _) = call(
+            app.clone(),
+            "put",
+            "/v1/config",
+            Some(&round_trip.to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            broadcast_key(daemons.recv().await.unwrap(), "keyed").as_deref(),
+            Some(SECRET)
+        );
+
+        // An empty key removes it.
+        let mut removal = got;
+        removal["version"] = json!("secret-v3");
+        removal["models"][0]["parameters"]["api_key"] = json!("");
+        let (status, removed) =
+            call(app.clone(), "put", "/v1/config", Some(&removal.to_string())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(removed["models"][0]["api_key_configured"], false);
+        assert_eq!(broadcast_key(daemons.recv().await.unwrap(), "keyed"), None);
     }
 
     #[tokio::test]

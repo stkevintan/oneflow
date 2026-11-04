@@ -92,8 +92,16 @@ export function ConfigEditor({ config, onPushed }: ConfigEditorProps) {
           setMessageState("idle");
           setMessage("Unsaved local changes.");
         }}
+        aria-describedby="config-editor-secrets"
         className="min-h-[260px] w-full resize-y rounded-lg border border-slate-800 bg-slate-950/80 p-3 font-mono text-xs leading-relaxed text-slate-100 focus:border-sky-500 focus:outline-none"
       />
+      <p id="config-editor-secrets" className="mt-2 text-xs text-slate-400">
+        Provider <code>api_key</code> values are write-only and never shown here;{" "}
+        <code>api_key_configured</code> tells you whether one is stored. Leave{" "}
+        <code>api_key</code> out to keep the stored key, set it to replace it, or set it to{" "}
+        <code>""</code> to remove it. Prefer <code>api_key_env</code>, which keeps the key on the
+        daemon host.
+      </p>
       <div className="mt-4 flex flex-wrap items-center gap-3">
         <button
           type="button"

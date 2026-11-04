@@ -81,13 +81,25 @@ impl VirtualKeyStore {
         serde_json::from_value(value).context("durable model configuration is invalid")
     }
 
-    /// Serialize model replacement with key creation so allowlist validation
-    /// cannot race a configuration change.
-    pub async fn set_config(&self, config: &ModelConfigSet) -> Result<()> {
+    /// Replace the configuration, resolving write-only `api_key` values
+    /// against the stored configuration in the same locked transaction, so a
+    /// concurrent replacement cannot resurrect or drop a key. The lock also
+    /// serializes replacement with key creation so allowlist validation cannot
+    /// race a configuration change. Returns the stored (unredacted)
+    /// configuration.
+    pub async fn replace_config(&self, incoming: ModelConfigSet) -> Result<ModelConfigSet> {
         let mut tx = self.pool.begin().await?;
         lock_mutations(&mut tx).await?;
+        let current: serde_json::Value =
+            sqlx::query_scalar("SELECT config FROM virtual_model_config WHERE singleton = TRUE")
+                .fetch_one(&mut *tx)
+                .await
+                .context("failed to read durable model configuration")?;
+        let current: ModelConfigSet =
+            serde_json::from_value(current).context("durable model configuration is invalid")?;
+        let config = crate::config_secrets::merge(incoming, &current);
         sqlx::query("UPDATE virtual_model_config SET config = $1 WHERE singleton = TRUE")
-            .bind(serde_json::to_value(config)?)
+            .bind(serde_json::to_value(&config)?)
             .execute(&mut *tx)
             .await
             .context("failed to persist model configuration")?;
@@ -95,7 +107,7 @@ impl VirtualKeyStore {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
-        Ok(())
+        Ok(config)
     }
 
     pub async fn create(&self, request: CreateVirtualKey, now: i64) -> Result<CreatedVirtualKey> {
@@ -429,12 +441,14 @@ mod tests {
         let Ok(database_url) = std::env::var("ONEFLOW_TEST_DATABASE_URL") else {
             return;
         };
+        let _config_lock = crate::SHARED_CONFIG_TEST_LOCK.lock().await;
         let initial = ModelConfigSet {
             version: "integration-v1".to_string(),
             models: vec![protocol::ModelConfig {
                 model_name: "integration-model".to_string(),
                 provider: "test".to_string(),
                 api_base: "https://example.invalid".to_string(),
+                api_key_configured: None,
                 parameters: protocol::ModelConfigParameters::new(),
             }],
         };
@@ -452,7 +466,7 @@ mod tests {
             .clone();
         let mut durable_config = store.config().await.unwrap();
         durable_config.version = format!("integration-{}", uuid::Uuid::new_v4());
-        store.set_config(&durable_config).await.unwrap();
+        store.replace_config(durable_config.clone()).await.unwrap();
         let before = store.snapshot(100).await.unwrap().revision;
         let created = store
             .create(
@@ -531,6 +545,7 @@ mod tests {
             eprintln!("Skipping daemon-bound key storage test: ONEFLOW_TEST_DATABASE_URL is unset");
             return;
         };
+        let _config_lock = crate::SHARED_CONFIG_TEST_LOCK.lock().await;
         let store = VirtualKeyStore::connect(&url, &crate::store::default_config())
             .await
             .unwrap();

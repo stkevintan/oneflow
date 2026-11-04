@@ -218,9 +218,12 @@ Items marked ✱ are addressed by
 
 - ✱ **Partial persistence.** Model configuration, virtual keys, and daemon
   credentials persist in PostgreSQL, but presence and usage do not.
-- **Plaintext secrets in config.** `parameters.api_key` is stored, returned by
-  `GET /v1/config`, and broadcast in clear text. Prefer `api_key_env`, which keeps
-  the secret on the daemon host.
+- **Provider keys stored and sent in clear text.** `parameters.api_key` is
+  write-only through the management API (never returned; responses report
+  `api_key_configured`), but it is stored unencrypted in PostgreSQL and sent to
+  daemons over the control channel, which is plaintext unless TLS is terminated
+  in front of the control plane. Prefer `api_key_env`, which keeps the secret
+  on the daemon host.
 - ✱ **Single control-plane instance.** State and broadcast are process-local.
 - ✱ **Lagging daemons can miss updates.** If a daemon falls behind the broadcast
   channel (capacity 32), skipped updates are logged but not re-sent until it

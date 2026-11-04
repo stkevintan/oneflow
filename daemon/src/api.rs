@@ -433,6 +433,7 @@ mod tests {
                 model_name: UPSTREAM_MODEL.to_string(),
                 provider: "custom_openai".to_string(),
                 api_base: format!("{base}/v1"),
+                api_key_configured: None,
                 parameters: ModelConfigParameters::new(),
             }])
             .await;
@@ -490,12 +491,14 @@ mod tests {
                     model_name: UPSTREAM_MODEL.into(),
                     provider: "custom_openai".into(),
                     api_base: format!("{base}/v1"),
+                    api_key_configured: None,
                     parameters: ModelConfigParameters::new(),
                 },
                 ModelConfig {
                     model_name: "restricted".into(),
                     provider: "custom_openai".into(),
                     api_base: format!("{base}/v1"),
+                    api_key_configured: None,
                     parameters: ModelConfigParameters::new(),
                 },
             ])

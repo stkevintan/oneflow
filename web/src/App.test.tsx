@@ -76,7 +76,8 @@ const CONFIG: ModelConfigSet = {
       model_name: "demo-model",
       provider: "custom_openai",
       api_base: "https://example.test/v1",
-      parameters: {},
+      api_key_configured: true,
+      parameters: { upstream_model: "demo-upstream" },
     },
   ],
 };
@@ -165,6 +166,27 @@ describe("dashboard", () => {
     const put = fetchMock.mock.calls.find(([, init]) => init?.method === "PUT");
     expect(put?.[0]).toBe("/v1/config");
     expect(JSON.parse(String(put?.[1]?.body)).version).toBe("smoke-v2");
+  });
+
+  it("round-trips a redacted configuration without sending an api_key", async () => {
+    const fetchMock = stubApi();
+    render(<App />);
+
+    const editor = (await screen.findByLabelText("Model configuration JSON")) as HTMLTextAreaElement;
+    await waitFor(() => expect(editor.value).not.toBe(""));
+    expect(editor.value).toContain('"api_key_configured": true');
+    expect(editor.value).not.toContain('"api_key":');
+    expect(screen.getByText(/values are write-only and never shown here/)).toBeTruthy();
+
+    const edited = { ...JSON.parse(editor.value), version: "smoke-v2" };
+    fireEvent.change(editor, { target: { value: JSON.stringify(edited) } });
+    fireEvent.click(screen.getByRole("button", { name: "Push configuration" }));
+
+    await screen.findByText("Configuration pushed to all connected daemons.");
+    const put = fetchMock.mock.calls.find(([, init]) => init?.method === "PUT");
+    const sent = JSON.parse(String(put?.[1]?.body)) as ModelConfigSet;
+    // Omitting api_key is what tells the control plane to keep the stored one.
+    expect(sent.models[0]?.parameters).toEqual({ upstream_model: "demo-upstream" });
   });
 
   it("sends an administrator token without persisting it in the form", async () => {

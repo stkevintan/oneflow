@@ -1,9 +1,17 @@
 mod api;
+mod config_secrets;
 mod control;
 mod daemon_credentials;
 mod key_api;
 mod store;
 mod virtual_keys;
+
+/// PostgreSQL-backed tests share one database, whose model configuration is a
+/// single row. Tests that replace it, or that create keys for the models it
+/// lists, hold this lock so one cannot swap the models out from under another.
+#[cfg(test)]
+pub(crate) static SHARED_CONFIG_TEST_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
 
 use std::{
     net::SocketAddr,
