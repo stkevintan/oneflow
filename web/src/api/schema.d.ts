@@ -474,6 +474,18 @@ export interface components {
              * @description Last acknowledged policy lease deadline, in Unix seconds.
              */
             auth_policy_valid_until: number | null;
+            /**
+             * @description Version label of the model configuration this daemon last
+             *     acknowledged applying, or null before its first acknowledgement
+             *     (daemons from before configuration acknowledgements never send one).
+             */
+            applied_config_version: string | null;
+            /**
+             * @description True when the daemon has acknowledged the current desired model
+             *     configuration. Compared by content, not by version label, so a
+             *     reused label for a different configuration still reads as pending.
+             */
+            config_in_sync: boolean;
         };
         UsageEventPage: {
             /** @description Newest first. */

@@ -18,7 +18,9 @@ use anyhow::{Context, Result};
 use auth::PolicyCache;
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
-use protocol::{ControlMessage, DaemonMessage, Heartbeat, ModelConfig, Registration, Telemetry};
+use protocol::{
+    ConfigAck, ControlMessage, DaemonMessage, Heartbeat, ModelConfig, Registration, Telemetry,
+};
 use serde::Deserialize;
 use tokio::{
     sync::{mpsc, RwLock},
@@ -356,6 +358,50 @@ mod config_tests {
         let resolved = resolve(&args, file).unwrap();
         assert_eq!(resolved.cp, "wss://cli.example:4000/control");
         assert_eq!(resolved.listen_addr, "127.0.0.1:9001");
+    }
+
+    #[tokio::test]
+    async fn config_update_is_acknowledged_only_when_it_carries_a_digest() {
+        let args = Args::try_parse_from(["oneflowd", "--cp", "ws://localhost/control"]).unwrap();
+        let settings =
+            DaemonSettings::from_config(&resolve(&args, DaemonConfig::default()).unwrap());
+        let (tx, _rx) = mpsc::channel(1);
+        let state = AppState::new(settings, tx).unwrap();
+        let update = |digest: Option<&str>| {
+            let mut value = serde_json::json!({
+                "type": "ConfigUpdate",
+                "version": "v7",
+                "models": [{
+                    "model_name": "m",
+                    "provider": "custom_openai",
+                    "api_base": "https://example.test/v1",
+                    "parameters": {},
+                }],
+            });
+            if let Some(digest) = digest {
+                value["digest"] = digest.into();
+            }
+            value.to_string()
+        };
+
+        match handle_control_message(&update(Some("d1")), &state).await {
+            Some(DaemonMessage::ConfigAck(ack)) => assert_eq!(
+                ack,
+                ConfigAck {
+                    version: "v7".into(),
+                    digest: "d1".into()
+                }
+            ),
+            other => panic!("expected ConfigAck, got {other:?}"),
+        }
+        assert!(state.model("m").await.is_some());
+
+        // An older control plane sends no digest: apply, but do not reply.
+        state.set_models(Vec::new()).await;
+        assert!(handle_control_message(&update(None), &state)
+            .await
+            .is_none());
+        assert!(state.model("m").await.is_some());
     }
 
     #[tokio::test]
@@ -749,10 +795,18 @@ async fn handle_control_message(text: &str, state: &AppState) -> Option<DaemonMe
                 Err(reason) => warn!(reason, "rejected virtual-key policy snapshot"),
             }
         }
-        Ok(ControlMessage::ConfigUpdate { models, version }) => {
+        Ok(ControlMessage::ConfigUpdate {
+            models,
+            version,
+            digest,
+        }) => {
             let model_count = models.len();
             state.set_models(models).await;
             info!(%version, model_count, "applied model configuration");
+            // Older control planes send no digest and expect no acknowledgement.
+            if let Some(digest) = digest {
+                return Some(DaemonMessage::ConfigAck(ConfigAck { version, digest }));
+            }
         }
         Ok(ControlMessage::Command { cmd, reason }) => {
             info!(%cmd, %reason, "received control command");

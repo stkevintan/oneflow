@@ -7,8 +7,10 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use protocol::{
-    Daemon, DaemonMessage, ModelConfig, ModelConfigParameters, ModelConfigSet, UsageEvent,
+    ControlMessage, Daemon, DaemonMessage, ModelConfig, ModelConfigParameters, ModelConfigSet,
+    UsageEvent,
 };
+use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tracing::info;
 
@@ -37,6 +39,21 @@ pub fn default_config() -> ModelConfigSet {
     }
 }
 
+/// Content digest of a configuration, sent with each `ConfigUpdate` and echoed
+/// back in `ConfigAck`. Serialization is deterministic: struct fields have a
+/// fixed order and `parameters` is a `BTreeMap`. It covers `api_key` too, so it
+/// is never exposed through the management API, only compared.
+pub fn config_digest(config: &ModelConfigSet) -> String {
+    let bytes = serde_json::to_vec(config).expect("model configuration always serializes");
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// The `ConfigUpdate` daemons are sent for `config`.
+pub fn config_message(config: ModelConfigSet) -> ControlMessage {
+    let digest = config_digest(&config);
+    ControlMessage::config_update(config, digest)
+}
+
 /// Filters for [`MemoryStore::usage_events`].
 #[derive(Debug, Default)]
 pub struct UsageQuery {
@@ -56,6 +73,9 @@ pub struct UsagePage {
 
 struct Inner {
     config: ModelConfigSet,
+    config_digest: String,
+    /// Digest each connection last acknowledged, keyed by `connection_id`.
+    applied_digests: BTreeMap<String, String>,
     /// Keyed by `connection_id`; a `BTreeMap` keeps list output stable.
     daemons: BTreeMap<String, Daemon>,
     /// `(sequence, event)`, oldest at the front.
@@ -71,6 +91,8 @@ impl MemoryStore {
     pub fn new(config: ModelConfigSet) -> Self {
         Self {
             inner: RwLock::new(Inner {
+                config_digest: config_digest(&config),
+                applied_digests: BTreeMap::new(),
                 config,
                 daemons: BTreeMap::new(),
                 usage: VecDeque::new(),
@@ -84,7 +106,14 @@ impl MemoryStore {
     }
 
     pub async fn set_config(&self, config: ModelConfigSet) {
-        self.inner.write().await.config = config;
+        let mut inner = self.inner.write().await;
+        let inner = &mut *inner;
+        inner.config_digest = config_digest(&config);
+        inner.config = config;
+        for (connection_id, daemon) in &mut inner.daemons {
+            daemon.config_in_sync =
+                inner.applied_digests.get(connection_id) == Some(&inner.config_digest);
+        }
     }
 
     /// Returns `(config_version, connected_daemons)` from one consistent read.
@@ -102,7 +131,9 @@ impl MemoryStore {
     }
 
     pub async fn daemon_disconnected(&self, connection_id: &str) {
-        self.inner.write().await.daemons.remove(connection_id);
+        let mut inner = self.inner.write().await;
+        inner.daemons.remove(connection_id);
+        inner.applied_digests.remove(connection_id);
     }
 
     pub async fn daemons(&self) -> Vec<Daemon> {
@@ -135,6 +166,13 @@ impl MemoryStore {
                     daemon.auth_policy_revision = Some(ack.revision);
                     daemon.auth_policy_valid_until = Some(ack.valid_until);
                 }
+            }
+            DaemonMessage::ConfigAck(ack) => {
+                daemon.config_in_sync = ack.digest == inner.config_digest;
+                daemon.applied_config_version = Some(ack.version);
+                inner
+                    .applied_digests
+                    .insert(connection_id.to_string(), ack.digest);
             }
             DaemonMessage::Registration(reg) => {
                 info!(
@@ -226,13 +264,15 @@ fn new_daemon(connection_id: &str, now: i64) -> Daemon {
         total_completion_tokens: 0,
         auth_policy_revision: None,
         auth_policy_valid_until: None,
+        applied_config_version: None,
+        config_in_sync: false,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{Telemetry, VirtualKeyPolicyAck};
+    use protocol::{ConfigAck, Telemetry, VirtualKeyPolicyAck};
 
     fn telemetry(daemon_id: &str, model_name: &str, request_id: &str) -> DaemonMessage {
         DaemonMessage::Telemetry(Telemetry {
@@ -376,5 +416,65 @@ mod tests {
         let daemon = store.daemon("conn").await.unwrap();
         assert_eq!(daemon.auth_policy_revision, Some(42));
         assert_eq!(daemon.auth_policy_valid_until, Some(345));
+    }
+
+    fn ack(config: &ModelConfigSet) -> DaemonMessage {
+        DaemonMessage::ConfigAck(ConfigAck {
+            version: config.version.clone(),
+            digest: config_digest(config),
+        })
+    }
+
+    #[tokio::test]
+    async fn config_ack_tracks_in_sync_against_the_desired_config() {
+        let initial = default_config();
+        let store = MemoryStore::new(initial.clone());
+        store.daemon_connected("conn", 1).await;
+        let daemon = store.daemon("conn").await.unwrap();
+        assert!(!daemon.config_in_sync);
+        assert_eq!(daemon.applied_config_version, None);
+
+        store.apply_daemon_message("conn", ack(&initial), 2).await;
+        let daemon = store.daemon("conn").await.unwrap();
+        assert!(daemon.config_in_sync);
+        assert_eq!(daemon.applied_config_version.as_deref(), Some("poc-v1"));
+
+        // A new desired config makes the daemon pending until it acknowledges it,
+        // even when the version label is reused.
+        let mut changed = initial.clone();
+        changed.models.pop();
+        store.set_config(changed.clone()).await;
+        assert!(!store.daemon("conn").await.unwrap().config_in_sync);
+
+        // A late ack for the old config does not count.
+        store.apply_daemon_message("conn", ack(&initial), 3).await;
+        assert!(!store.daemon("conn").await.unwrap().config_in_sync);
+
+        store.apply_daemon_message("conn", ack(&changed), 4).await;
+        assert!(store.daemon("conn").await.unwrap().config_in_sync);
+
+        // Reverting to a config the daemon already applied needs no new ack.
+        store.set_config(initial.clone()).await;
+        store.set_config(changed).await;
+        assert!(store.daemon("conn").await.unwrap().config_in_sync);
+
+        store.daemon_disconnected("conn").await;
+        store.daemon_connected("conn", 5).await;
+        assert!(!store.daemon("conn").await.unwrap().config_in_sync);
+    }
+
+    #[test]
+    fn config_digest_is_stable_and_content_sensitive() {
+        let config = default_config();
+        assert_eq!(config_digest(&config), config_digest(&config.clone()));
+        let mut keyed = config.clone();
+        keyed.models[0].parameters.insert("api_key", "rotated");
+        assert_ne!(config_digest(&config), config_digest(&keyed));
+        match config_message(config.clone()) {
+            ControlMessage::ConfigUpdate { digest, .. } => {
+                assert_eq!(digest, Some(config_digest(&config)))
+            }
+            other => panic!("expected ConfigUpdate, got {other:?}"),
+        }
     }
 }

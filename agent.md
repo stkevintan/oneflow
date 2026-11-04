@@ -123,7 +123,7 @@ contract/openapi.yaml                 source of truth, edited first
 - Earlier end-to-end checks still hold: config pushed through `PUT /v1/config` is broadcast, a live
   daemon immediately serves the new model list, `upstream_model` rewrites the model id sent
   upstream, and `api_key_env` injects the upstream bearer token
-- `cargo test --workspace` passes: 32 control-plane, 32 daemon, 2 protocol, and 6
+- `cargo test --workspace` passes: 34 control-plane, 33 daemon, 3 protocol, and 6
   config-provider tests; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets`,
   `scripts/generate-types.sh --check`, `npm test` (18), `npm run typecheck` and `npm run build`
   pass. The PostgreSQL-backed control-plane tests are skipped unless
@@ -196,8 +196,9 @@ address. The inference routes use fixed paths such as `/v1/chat/completions`.
    replace the daemon-local `DAEMON_API_KEYS` scaffolding; keys can be bound to one daemon.
 4. **Persistence**: ✅ PostgreSQL holds model configuration, virtual keys, and daemon credentials
    (ADR 0001 steps 3–4). Presence and usage are still process-local.
-5. **Desired vs applied**: daemon sends a config ack so the dashboard shows in-sync/pending.
-   (Virtual-key policy acks already work; model configuration has no ack yet.)
+5. **Desired vs applied**: ✅ `ConfigUpdate` carries a content digest, the daemon answers with
+   `ConfigAck`, and `/v1/daemons` reports `applied_config_version` and `config_in_sync`, shown
+   as In sync/Pending on the dashboard. Daemons from before this never ack and read as pending.
 6. **Dashboard**: model list + form instead of the raw-JSON editor, telemetry filters. Key
    management per daemon is done.
 

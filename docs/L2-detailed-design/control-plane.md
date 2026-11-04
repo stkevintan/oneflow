@@ -176,7 +176,14 @@ stateDiagram-v2
 ```
 
 The task subscribes to the broadcast channel before reading the config it sends
-first, so an update made during the handshake is not lost. It then runs a
+first, so an update made during the handshake is not lost.
+
+Every `ConfigUpdate` carries `store::config_digest` of the configuration. A
+`ConfigAck` records the daemon's `applied_config_version` and acknowledged digest,
+and `config_in_sync` is true while that digest equals the desired one. `set_config`
+recomputes it for every connection, so a new `PUT` turns daemons pending until they
+ack, and reverting to a configuration a daemon already applied reads as in sync
+again. The record is per connection and reset on reconnect. It then runs a
 `tokio::select!` over `socket.recv()` and `updates.recv()`.
 
 ### `MemoryStore::apply_daemon_message`
@@ -218,7 +225,8 @@ daemon and usage events:
 | `cors_is_only_granted_to_configured_origins` | Allowed, denied, and disabled CORS |
 
 `store::tests` cover bounded history, paging, filter-before-limit, null
-serialization, and messages for unknown connections. `config_secrets::tests`
+serialization, messages for unknown connections, and config acknowledgement
+(`config_ack_tracks_in_sync_against_the_desired_config`). `config_secrets::tests`
 cover redaction and the keep/replace/remove merge rules, including that a
 renamed model does not inherit a key. The WebSocket path is not covered by
 automated tests.

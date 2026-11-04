@@ -237,7 +237,7 @@ async fn reload_model_config(state: &AppState, key_store: &VirtualKeyStore, forc
                 state.store.set_config(config.clone()).await;
             }
             if force || changed {
-                let _ = state.broadcast.send(ControlMessage::from(config));
+                let _ = state.broadcast.send(store::config_message(config));
             }
         }
         Err(err) => error!(error = %err, "failed to reload durable model configuration"),

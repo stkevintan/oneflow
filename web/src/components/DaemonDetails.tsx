@@ -114,6 +114,8 @@ export function DaemonDetails({ daemonId, snapshot, ready }: Props) {
           <p key={connection.connection_id} className="mt-2 text-sm text-slate-400">
             Host: {connection.hostname ?? "Unknown"} | Version: {connection.version ?? "Unknown"}
             {" | "}Loaded models: {connection.loaded_models.join(", ") || "None"}
+            {" | "}Config: {connection.config_in_sync ? "in sync" : "pending"}
+            {connection.applied_config_version !== null && ` (applied ${connection.applied_config_version})`}
           </p>
         ))}
         <p className="mt-2 text-sm text-slate-400">Consumers use the daemon&apos;s reachable inference URL

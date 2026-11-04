@@ -98,7 +98,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, identity: Authent
                                             break;
                                         }
                                     };
-                                    let config = ControlMessage::from(config);
+                                    let config = crate::store::config_message(config);
                                     if send_control_message(&mut socket, &config).await.is_err() {
                                         break;
                                     }
@@ -123,7 +123,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, identity: Authent
                                 let claimed_id = match &message {
                                     DaemonMessage::Heartbeat(heartbeat) => Some(heartbeat.daemon_id.as_str()),
                                     DaemonMessage::Telemetry(telemetry) => Some(telemetry.daemon_id.as_str()),
-                                    DaemonMessage::Registration(_) | DaemonMessage::VirtualKeyPolicyAck(_) => None,
+                                    DaemonMessage::Registration(_)
+                                    | DaemonMessage::VirtualKeyPolicyAck(_)
+                                    | DaemonMessage::ConfigAck(_) => None,
                                 };
                                 if claimed_id.is_some_and(|claimed_id| claimed_id != daemon_identity) {
                                     warn!(%connection_id, "rejected daemon message with mismatched identity");

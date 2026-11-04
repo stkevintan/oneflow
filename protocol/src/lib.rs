@@ -51,6 +51,11 @@ pub enum ControlMessage {
     ConfigUpdate {
         models: Vec<ModelConfig>,
         version: String,
+        /// Opaque content digest chosen by the control plane. A daemon that
+        /// applies the update echoes it back in [`DaemonMessage::ConfigAck`].
+        /// Absent from older control planes; older daemons ignore it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        digest: Option<String>,
     },
     Command {
         cmd: String,
@@ -58,11 +63,13 @@ pub enum ControlMessage {
     },
 }
 
-impl From<ModelConfigSet> for ControlMessage {
-    fn from(config: ModelConfigSet) -> Self {
+impl ControlMessage {
+    /// A `ConfigUpdate` carrying `config` and the digest daemons acknowledge.
+    pub fn config_update(config: ModelConfigSet, digest: impl Into<String>) -> Self {
         ControlMessage::ConfigUpdate {
             models: config.models,
             version: config.version,
+            digest: Some(digest.into()),
         }
     }
 }
@@ -71,6 +78,7 @@ impl From<ModelConfigSet> for ControlMessage {
 #[serde(tag = "type")]
 pub enum DaemonMessage {
     VirtualKeyPolicyAck(VirtualKeyPolicyAck),
+    ConfigAck(ConfigAck),
     Registration(Registration),
     Heartbeat(Heartbeat),
     Telemetry(Telemetry),
@@ -114,6 +122,14 @@ pub struct VirtualKeyPolicyAck {
     pub protocol_version: u32,
     pub revision: i64,
     pub valid_until: i64,
+}
+
+/// Sent by a daemon after it applies a `ConfigUpdate` that carried a digest.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigAck {
+    pub version: String,
+    pub digest: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -211,6 +227,40 @@ mod virtual_key_tests {
         let value = serde_json::to_value(ack).unwrap();
         assert_eq!(value["type"], "VirtualKeyPolicyAck");
         assert_eq!(value["valid_until"], 1300);
+    }
+
+    #[test]
+    fn config_update_digest_is_optional_and_acknowledged() {
+        // An update from an older control plane (no digest) still parses.
+        let legacy: ControlMessage = serde_json::from_value(serde_json::json!({
+            "type": "ConfigUpdate", "version": "v1", "models": []
+        }))
+        .unwrap();
+        assert!(matches!(
+            legacy,
+            ControlMessage::ConfigUpdate { digest: None, .. }
+        ));
+
+        let update = ControlMessage::config_update(
+            ModelConfigSet {
+                version: "v2".into(),
+                models: vec![],
+            },
+            "abc",
+        );
+        let value = serde_json::to_value(&update).unwrap();
+        assert_eq!(value["type"], "ConfigUpdate");
+        assert_eq!(value["digest"], "abc");
+
+        let ack = DaemonMessage::ConfigAck(ConfigAck {
+            version: "v2".into(),
+            digest: "abc".into(),
+        });
+        let value = serde_json::to_value(&ack).unwrap();
+        assert_eq!(value["type"], "ConfigAck");
+        assert_eq!(value["digest"], "abc");
+        let parsed: DaemonMessage = serde_json::from_value(value).unwrap();
+        assert!(matches!(parsed, DaemonMessage::ConfigAck(_)));
     }
 
     #[test]

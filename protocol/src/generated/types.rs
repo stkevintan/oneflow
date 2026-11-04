@@ -180,12 +180,22 @@ pub struct DaemonList {
 pub struct Daemon {
     ///Constraint: minimum=0
     pub active_requests: i64,
+    /**Version label of the model configuration this daemon last
+acknowledged applying, or null before its first acknowledgement
+(daemons from before configuration acknowledgements never send one).
+*/
+    pub applied_config_version: Option<String>,
     ///Last acknowledged virtual-key policy revision.
     pub auth_policy_revision: Option<i64>,
     ///Last acknowledged policy lease deadline, in Unix seconds.
     pub auth_policy_valid_until: Option<i64>,
     pub capabilities: Vec<String>,
     pub cluster_name: Option<String>,
+    /**True when the daemon has acknowledged the current desired model
+configuration. Compared by content, not by version label, so a
+reused label for a different configuration still reads as pending.
+*/
+    pub config_in_sync: bool,
     ///Unix timestamp in seconds.
     pub connected_at: i64,
     ///Identifier for this control-channel connection.

@@ -70,7 +70,7 @@ Every frame is a JSON text frame with a `type` discriminator (`#[serde(tag = "ty
 
 | `type` | Fields | Behavior |
 | --- | --- | --- |
-| `ConfigUpdate` | `version`, `models: ModelConfig[]` | Sent on connect and on every accepted `PUT /v1/config`. The daemon replaces its entire model table. |
+| `ConfigUpdate` | `version`, `models: ModelConfig[]`, `digest?` | Sent on connect and on every accepted `PUT /v1/config`. The daemon replaces its entire model table, then acknowledges with `ConfigAck` when `digest` is present. |
 | `Command` | `cmd`, `reason` | Reserved. Never sent by the control plane today; the daemon only logs it. |
 | `VirtualKeyPolicySnapshot` | `protocol_version`, `revision`, `issued_at`, `valid_until`, `keys[]` | Authenticated virtual-key deployments only; atomically replaces the leased authorization cache. |
 
@@ -82,12 +82,18 @@ in equal-revision policy comparisons. Older daemons reject scoped policies;
 upgrade daemons before issuing scoped keys.
 
 ```json
-{"type":"ConfigUpdate","version":"poc-v1","models":[{"model_name":"deepseek-v4-flash","provider":"custom_openai","api_base":"https://api.deepseek.com/v1","parameters":{"api_key_env":"DEEPSEEK_API_KEY"}}]}
+{"type":"ConfigUpdate","version":"poc-v1","models":[{"model_name":"deepseek-v4-flash","provider":"custom_openai","api_base":"https://api.deepseek.com/v1","parameters":{"api_key_env":"DEEPSEEK_API_KEY"}}],"digest":"3f9a…"}
 ```
 
 The `ConfigUpdate` payload is the contract's `ModelConfigSet`
-(`impl From<ModelConfigSet> for ControlMessage`). The variant name is kept, so
-the wire format did not change when the HTTP API moved to v1.
+(`ControlMessage::config_update`, built by `store::config_message`). The variant
+name is kept, so the wire format did not change when the HTTP API moved to v1.
+
+`digest` is the SHA-256 of the serialized `ModelConfigSet`, including any literal
+`api_key`, so it changes when only a key rotates. It is opaque to the daemon,
+which echoes it back unchanged, and it is never returned by the management API.
+It is optional on the wire: an older control plane omits it (and the daemon then
+sends no ack), and an older daemon ignores it.
 
 ### Daemon → control plane: `DaemonMessage`
 
@@ -97,6 +103,7 @@ the wire format did not change when the HTTP API moved to v1.
 | `Heartbeat` | `daemon_id`, `active_requests`, `loaded_models[]` | Every 5 s |
 | `Telemetry` | `daemon_id`, `model_name`, `prompt_tokens`, `completion_tokens`, `success`, `request_id`, `latency_ms`, `status_code?`, `streamed`, `usage_reported` | After every upstream call completes or fails |
 | `VirtualKeyPolicyAck` | `protocol_version`, `revision`, `valid_until` | After applying a policy snapshot |
+| `ConfigAck` | `version`, `digest` | After applying a `ConfigUpdate` that carried a `digest` |
 
 ```json
 {"type":"Telemetry","daemon_id":"daemon-poc-001","model_name":"deepseek-v4-flash","prompt_tokens":12,"completion_tokens":40,"success":true,"request_id":"6f1c…","latency_ms":812,"status_code":200,"streamed":true,"usage_reported":true}
@@ -123,5 +130,7 @@ authorize the request. Telemetry without attribution is rejected.
 
 - The control channel is not described by a machine-readable schema (for
   example AsyncAPI), so non-Rust clients have to read `protocol/src/lib.rs`.
-- No message acknowledgements: the control plane cannot tell whether a daemon
-  applied a `ConfigUpdate` except by watching `loaded_models` in heartbeats.
+- `ConfigAck` reports that the daemon replaced its model table, not that the
+  upstreams are reachable or that `api_key_env` variables are set on the host.
+- An older daemon never sends `ConfigAck`, so it stays pending in `/v1/daemons`
+  even when it applied the configuration.
