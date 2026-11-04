@@ -40,7 +40,11 @@ export function DaemonTable({ daemons }: DaemonTableProps) {
             {daemons.map((daemon) => (
               <tr key={daemon.connection_id} className="hover:bg-slate-800/40">
                 <td className="whitespace-nowrap border-b border-slate-800/70 px-3 py-2 font-mono text-xs text-slate-200">
-                  {daemon.daemon_id ?? `(unregistered ${daemon.connection_id.slice(0, 8)})`}
+                  {daemon.daemon_id ? (
+                    <a href={`#daemon=${encodeURIComponent(daemon.daemon_id)}`} className="text-sky-300 hover:underline">
+                      {daemon.daemon_id}
+                    </a>
+                  ) : `(unregistered ${daemon.connection_id.slice(0, 8)})`}
                 </td>
                 <td className="whitespace-nowrap border-b border-slate-800/70 px-3 py-2 text-slate-300">
                   {daemon.cluster_name ?? "—"}

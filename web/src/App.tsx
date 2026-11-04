@@ -3,6 +3,7 @@ import { Card } from "./components/Card";
 import { ConfigEditor } from "./components/ConfigEditor";
 import { DaemonTable } from "./components/DaemonTable";
 import { DaemonCredentials } from "./components/DaemonCredentials";
+import { DaemonDetails } from "./components/DaemonDetails";
 import { TelemetryTable } from "./components/TelemetryTable";
 import { Topbar } from "./components/Topbar";
 
@@ -10,6 +11,13 @@ export default function App() {
   const { snapshot, error, connection, refresh } = useDashboard();
   const [token, setToken] = useState("");
   const [authRevision, setAuthRevision] = useState(0);
+  const [daemonId, setDaemonId] = useState(() => new URLSearchParams(window.location.hash.slice(1)).get("daemon"));
+
+  useEffect(() => {
+    const onHashChange = () => setDaemonId(new URLSearchParams(window.location.hash.slice(1)).get("daemon"));
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
 
   return (
     <div className="min-h-screen bg-slate-950">
@@ -49,32 +57,46 @@ export default function App() {
           </p>
         ) : null}
 
-        <DaemonCredentials key={authRevision}
-          credentials={snapshot?.credentials ?? []}
-          ready={connection === "live"} onChanged={refresh} />
+        {daemonId ? (
+          <DaemonDetails
+            key={`${authRevision}:${daemonId}`}
+            daemonId={daemonId}
+            snapshot={snapshot}
+            ready={connection === "live"}
+          />
+        ) : (
+          <>
+            <DaemonCredentials
+              key={authRevision}
+              credentials={snapshot?.credentials ?? []}
+              ready={connection === "live"}
+              onChanged={refresh}
+            />
 
-        <Card
-          title="Connected daemons"
-          badge={
-            <span className="rounded-full border border-slate-700 bg-slate-800 px-2 py-0.5 text-xs font-medium normal-case tracking-normal text-slate-400">
-              {snapshot?.daemons.length ?? 0}
-            </span>
-          }
-        >
-          <DaemonTable daemons={snapshot?.daemons ?? []} />
-        </Card>
+            <Card
+              title="Connected daemons"
+              badge={
+                <span className="rounded-full border border-slate-700 bg-slate-800 px-2 py-0.5 text-xs font-medium normal-case tracking-normal text-slate-400">
+                  {snapshot?.daemons.length ?? 0}
+                </span>
+              }
+            >
+              <DaemonTable daemons={snapshot?.daemons ?? []} />
+            </Card>
 
-        <Card
-          title="Recent usage"
-          hint={`Latest ${RECENT_USAGE_LIMIT} events across all daemons`}
-        >
-          <TelemetryTable events={snapshot?.usage ?? []} limit={RECENT_USAGE_LIMIT} />
-        </Card>
+            <Card
+              title="Recent usage"
+              hint={`Latest ${RECENT_USAGE_LIMIT} events across all daemons`}
+            >
+              <TelemetryTable events={snapshot?.usage ?? []} limit={RECENT_USAGE_LIMIT} />
+            </Card>
 
-        <ConfigEditor config={snapshot?.config ?? null} onPushed={refresh} />
+            <ConfigEditor config={snapshot?.config ?? null} onPushed={refresh} />
+          </>
+        )}
       </main>
     </div>
   );
 }
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { setAdminToken } from "./api/client";

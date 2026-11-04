@@ -20,6 +20,7 @@ use crate::{
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct GenerateParams {
+    daemon_id: Option<String>,
     key_alias: Option<String>,
     models: Vec<String>,
     duration: Option<String>,
@@ -56,6 +57,7 @@ fn timestamp(value: Option<i64>) -> anyhow::Result<Option<String>> {
 fn metadata(key: &VirtualKey, hash: &str) -> anyhow::Result<Value> {
     Ok(json!({
         "token": hash,
+        "daemon_id": key.daemon_id,
         "key_alias": key.name,
         "models": key.allowed_models,
         "expires": timestamp(key.expires_at)?,
@@ -103,6 +105,7 @@ pub(crate) async fn generate(
         },
     };
     let request = CreateVirtualKey {
+        daemon_id: params.daemon_id,
         name: params
             .key_alias
             .unwrap_or_else(|| format!("key-{}", uuid::Uuid::new_v4().simple())),
@@ -179,6 +182,7 @@ pub(crate) async fn info(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ListParams {
+    daemon_id: Option<String>,
     page: Option<i64>,
     size: Option<i64>,
     return_full_object: Option<bool>,
@@ -200,13 +204,24 @@ pub(crate) async fn list(
     };
     let page = params.page.unwrap_or(1);
     let size = params.size.unwrap_or(10);
+    if params
+        .daemon_id
+        .as_deref()
+        .is_some_and(|id| !crate::daemon_credentials::valid_daemon_id(id))
+    {
+        return error(StatusCode::BAD_REQUEST, "invalid daemon_id");
+    }
     if page < 1 || !(1..=100).contains(&size) || (page - 1).checked_mul(size).is_none() {
         return error(
             StatusCode::BAD_REQUEST,
             "page must be positive and size must be between 1 and 100",
         );
     }
-    match mode.store.list_page(page, size).await {
+    match mode
+        .store
+        .list_page(page, size, params.daemon_id.as_deref())
+        .await
+    {
         Ok((keys, total)) => {
             let keys: anyhow::Result<Vec<Value>> = keys
                 .iter()
@@ -332,6 +347,12 @@ mod tests {
                 .unwrap(),
         );
         let model = store.config().await.unwrap().models[0].model_name.clone();
+        let daemon_id = format!("consumer-api-{}", uuid::Uuid::new_v4());
+        store
+            .create_daemon(&daemon_id, now_ts())
+            .await
+            .unwrap()
+            .unwrap();
         let (broadcast, _) = tokio::sync::broadcast::channel(8);
         let state = AppState {
             store: Arc::new(crate::store::MemoryStore::new(
@@ -373,6 +394,8 @@ mod tests {
             json!({"models":[model],"max_budget":5}),
             json!({"models":[model],"duration":"0h"}),
             json!({"models":["not-configured"]}),
+            json!({"models":[model],"daemon_id":"missing-daemon"}),
+            json!({"models":[model],"daemon_id":""}),
         ] {
             let response = app
                 .clone()
@@ -387,7 +410,7 @@ mod tests {
                 "POST",
                 "/key/generate",
                 json!({
-                    "models":[model], "key_alias":"litellm-app", "duration":"1h"
+                    "models":[model], "key_alias":"litellm-app", "duration":"1h", "daemon_id": daemon_id
                 }),
             ))
             .await
@@ -401,6 +424,7 @@ mod tests {
         assert!(secret.starts_with("sk-"));
         assert!(created["expires"].as_str().unwrap().ends_with('Z'));
         assert_eq!(created["models"], json!([model]));
+        assert_eq!(created["daemon_id"], daemon_id);
         let hash = hex::encode(Sha256::digest(secret.as_bytes()));
         assert_eq!(created["token"], hash);
         let id = created["token_id"].as_str().unwrap();
@@ -420,6 +444,7 @@ mod tests {
                     .unwrap();
             assert_eq!(body["key"], hash);
             assert_eq!(body["info"]["key_alias"], "litellm-app");
+            assert_eq!(body["info"]["daemon_id"], daemon_id);
             assert!(!body.to_string().contains(secret));
         }
         for full in [false, true] {
@@ -427,7 +452,9 @@ mod tests {
                 .clone()
                 .oneshot(request(
                     "GET",
-                    &format!("/key/list?page=1&size=100&return_full_object={full}"),
+                    &format!(
+                        "/key/list?page=1&size=100&return_full_object={full}&daemon_id={daemon_id}"
+                    ),
                     Value::Null,
                 ))
                 .await
@@ -437,7 +464,7 @@ mod tests {
                 serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
                     .unwrap();
             assert_eq!(body["current_page"], 1);
-            assert!(body["total_count"].as_i64().unwrap() > 0);
+            assert_eq!(body["total_count"], 1);
             let keys = body["keys"].as_array().unwrap();
             assert!(keys.iter().all(|key| if full {
                 key["token"].is_string()
@@ -446,6 +473,21 @@ mod tests {
             }));
             assert!(!body.to_string().contains(secret));
         }
+        let response = app
+            .clone()
+            .oneshot(request(
+                "GET",
+                "/key/list?daemon_id=another-daemon&return_full_object=true",
+                Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["total_count"], 0);
+        assert_eq!(body["keys"], json!([]));
         let response = app
             .clone()
             .oneshot(request(

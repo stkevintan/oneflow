@@ -115,7 +115,11 @@ export function DaemonCredentials({ credentials, ready, onChanged }: Props) {
           )}</tr></thead>
           <tbody>{credentials.map((credential) => (
             <tr key={credential.daemon_id}>
-              <td className="p-2 font-mono">{credential.daemon_id}</td>
+              <td className="p-2 font-mono">
+                <a href={`#daemon=${encodeURIComponent(credential.daemon_id)}`} className="text-sky-300 hover:underline">
+                  {credential.daemon_id}
+                </a>
+              </td>
               <td className="p-2">{credential.revoked_at === null ? "Active" : "Revoked"}</td>
               <td className="p-2">{formatClock(credential.created_at)}</td>
               <td className="p-2">{credential.rotated_at === null ? "Never" : formatClock(credential.rotated_at)}</td>

@@ -94,13 +94,23 @@ function stubApi() {
   const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
     const path = input.split("?")[0];
     if (path === "/v1/status") return jsonResponse(STATUS);
-    if (path === "/v1/daemons/credentials") return jsonResponse({ items: [] });
+    if (path === "/v1/daemons/credentials") return jsonResponse({ items: [{
+      daemon_id: "daemon-poc-001", created_at: 1_700_000_000, revoked_at: null, rotated_at: null,
+    }] });
     if (path === "/v1/daemons") return jsonResponse(DAEMONS);
     if (path === "/v1/usage/events") return jsonResponse(USAGE);
     if (path === "/v1/config" && init?.method === "PUT") {
       return jsonResponse(JSON.parse(String(init.body)));
     }
     if (path === "/v1/config") return jsonResponse(CONFIG);
+    if (path === "/key/list") return jsonResponse({
+      keys: [], total_count: 0, current_page: 1, total_pages: 0,
+    });
+    if (path === "/key/generate") return jsonResponse({
+      key: "sk-one-time-consumer", token: "a".repeat(64), token_id: "b".repeat(32),
+      daemon_id: "daemon-poc-001", key_alias: "external-app", models: ["demo-model"],
+      created_at: "2026-10-22T09:00:00Z", expires: null, blocked: false,
+    });
     return jsonResponse({ error: `no API route matches ${path}` }, 404);
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -111,6 +121,7 @@ describe("dashboard", () => {
   afterEach(() => {
     setAdminToken("");
     cleanup();
+    window.history.replaceState(null, "", "/");
     vi.unstubAllGlobals();
   });
 
@@ -182,5 +193,38 @@ describe("dashboard", () => {
 
     expect(await screen.findByRole("alert")).toHaveProperty("textContent");
     expect(screen.getByText(/Cannot reach the control plane/)).toBeTruthy();
+  });
+
+  it("opens daemon details from a daemon link and creates a consumer key using the typed API", async () => {
+    const fetchMock = stubApi();
+    render(<App />);
+    const links = await screen.findAllByRole("link", { name: "daemon-poc-001" });
+    expect(links.length).toBe(2);
+    fireEvent.click(links[0]!);
+    await screen.findByRole("heading", { name: "Daemon: daemon-poc-001" });
+    await screen.findByText("No consumer keys for this daemon.");
+    expect(fetchMock.mock.calls.some(([url]) =>
+      url === "/key/list?daemon_id=daemon-poc-001&page=1&size=10&return_full_object=true"
+    )).toBe(true);
+    fireEvent.change(screen.getByLabelText("Consumer name"), { target: { value: "external-app" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create virtual key" }));
+    expect((await screen.findByLabelText("One-time consumer key") as HTMLInputElement).value).toBe("sk-one-time-consumer");
+    const generation = fetchMock.mock.calls.find(([url]) => url === "/key/generate");
+    expect(generation?.[1]?.method).toBe("POST");
+    expect(generation?.[1]?.cache).toBe("no-store");
+    expect(JSON.parse(String(generation?.[1]?.body))).toEqual({
+      daemon_id: "daemon-poc-001", key_alias: "external-app", models: ["demo-model"], duration: null,
+    });
+    fireEvent.click(screen.getByRole("link", { name: "Back to dashboard" }));
+    await screen.findByRole("heading", { name: /Connected daemons/ });
+    expect(screen.queryByLabelText("One-time consumer key")).toBeNull();
+  });
+
+  it("opens a bookmarked daemon detail page", async () => {
+    stubApi();
+    window.history.replaceState(null, "", "/#daemon=daemon-poc-001");
+    render(<App />);
+    await screen.findByRole("heading", { name: "Consumer virtual keys" });
+    expect(screen.queryByRole("heading", { name: /Connected daemons/ })).toBeNull();
   });
 });

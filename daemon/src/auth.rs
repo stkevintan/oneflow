@@ -111,6 +111,7 @@ impl PolicyCache {
         token: &str,
         now: i64,
         monotonic_now: Instant,
+        daemon_id: &str,
     ) -> Result<Principal, AuthFailure> {
         let id = token_id(token).ok_or(AuthFailure::InvalidKey)?;
         let snapshot = self
@@ -130,6 +131,10 @@ impl PolicyCache {
         let digest = format!("{:x}", Sha256::digest(token.as_bytes()));
         if !bool::from(digest.as_bytes().ct_eq(policy.token_sha256.as_bytes()))
             || policy.expires_at.is_some_and(|expiry| now >= expiry)
+            || policy
+                .daemon_id
+                .as_deref()
+                .is_some_and(|id| id != daemon_id)
         {
             return Err(AuthFailure::InvalidKey);
         }
@@ -155,6 +160,7 @@ mod tests {
             issued_at: 1000,
             valid_until: 1300,
             keys: vec![VirtualKeyPolicy {
+                daemon_id: None,
                 key_id: "a".repeat(32),
                 token_sha256: format!("{:x}", Sha256::digest(token().as_bytes())),
                 allowed_models: vec!["alias".into()],
@@ -168,26 +174,35 @@ mod tests {
         let instant = Instant::now();
         let mut cache = PolicyCache::default();
         assert!(matches!(
-            cache.authenticate(&token(), 1000, instant),
+            cache.authenticate(&token(), 1000, instant, "daemon-a"),
             Err(AuthFailure::Unavailable)
         ));
         cache.apply(snapshot(), 1000, instant).unwrap();
-        assert!(cache.authenticate(&token(), 1299, instant).is_ok());
+        assert!(cache
+            .authenticate(&token(), 1299, instant, "daemon-a")
+            .is_ok());
         assert!(matches!(
-            cache.authenticate(&token(), 1300, instant),
+            cache.authenticate(&token(), 1300, instant, "daemon-a"),
             Err(AuthFailure::Unavailable)
         ));
         assert!(matches!(
-            cache.authenticate(&token(), 900, instant + Duration::from_secs(300)),
+            cache.authenticate(
+                &token(),
+                900,
+                instant + Duration::from_secs(300),
+                "daemon-a"
+            ),
             Err(AuthFailure::Unavailable)
         ));
         let mut expired = snapshot();
         expired.keys[0].expires_at = Some(1001);
         let mut cache = PolicyCache::default();
         cache.apply(expired, 1000, instant).unwrap();
-        assert!(cache.authenticate(&token(), 1000, instant).is_ok());
+        assert!(cache
+            .authenticate(&token(), 1000, instant, "daemon-a")
+            .is_ok());
         assert!(matches!(
-            cache.authenticate(&token(), 1001, instant),
+            cache.authenticate(&token(), 1001, instant, "daemon-a"),
             Err(AuthFailure::InvalidKey)
         ));
     }
@@ -216,7 +231,7 @@ mod tests {
         renewal.keys.clear();
         cache.apply(renewal, 1060, instant).unwrap();
         assert!(matches!(
-            cache.authenticate(&token(), 1060, instant),
+            cache.authenticate(&token(), 1060, instant, "daemon-a"),
             Err(AuthFailure::InvalidKey)
         ));
     }
@@ -233,7 +248,7 @@ mod tests {
         conflict.keys.clear();
         assert!(cache.apply(conflict, 1060, instant).is_err());
         assert!(cache
-            .authenticate(&token(), 1000, instant)
+            .authenticate(&token(), 1000, instant, "daemon-a")
             .unwrap()
             .allows("alias"));
         assert!(token_id("invalid").is_none());
@@ -243,5 +258,26 @@ mod tests {
             token_id(&new_token),
             Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         );
+    }
+
+    #[test]
+    fn consumer_key_is_only_accepted_by_its_daemon() {
+        let instant = Instant::now();
+        let mut scoped = snapshot();
+        scoped.keys[0].daemon_id = Some("daemon-a".into());
+        let mut cache = PolicyCache::default();
+        cache.apply(scoped, 1000, instant).unwrap();
+        assert!(cache
+            .authenticate(&token(), 1000, instant, "daemon-a")
+            .is_ok());
+        assert!(matches!(
+            cache.authenticate(&token(), 1000, instant, "daemon-b"),
+            Err(AuthFailure::InvalidKey)
+        ));
+        let mut conflicting = snapshot();
+        conflicting.keys[0].daemon_id = Some("daemon-b".into());
+        conflicting.issued_at += 60;
+        conflicting.valid_until += 60;
+        assert!(cache.apply(conflicting, 1060, instant).is_err());
     }
 }

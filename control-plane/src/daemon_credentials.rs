@@ -168,7 +168,7 @@ pub(crate) struct CreateParams {
     daemon_id: String,
 }
 
-fn valid_daemon_id(id: &str) -> bool {
+pub(crate) fn valid_daemon_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
         && id

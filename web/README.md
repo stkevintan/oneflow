@@ -20,6 +20,33 @@ Credential metadata is separate from the live connection table. Authentication
 and storage failures are surfaced explicitly; provisioning is never anonymous.
 See [deployment](../docs/virtual-keys.md#3-start-a-virtual-key-daemon).
 
+## Daemon details and consumer keys
+
+Click a daemon ID in **Connected daemons** or **Daemon credentials** to open
+its detail page. The URL uses `#daemon=<id>`, supports browser back/forward,
+and can be bookmarked (the administrator token still needs to be applied after
+reload). Offline and revoked daemons have detail pages too.
+
+The **Consumer virtual keys** section creates credentials for applications
+calling that daemon's OpenAI-compatible endpoint. Enter a consumer name, choose
+allowed model aliases, optionally set an expiry such as `30d`, and click
+**Create virtual key**. All currently configured aliases are initially selected;
+at least one is required. Copy the one-time `sk-...` key before dismissing it
+or leaving the page. Nothing is saved in browser storage.
+
+Keys created here are bound to the selected daemon and are rejected by other
+daemons, even when they expose the same models. Listing is paginated and shows
+metadata only; revocation requires confirmation. Previously issued unbound keys
+remain cross-daemon and are not included in this daemon-filtered list.
+Use the consumer key as the app's API key, not as a provider credential or
+daemon control token. Use the daemon's reachable `/v1` endpoint as the app's
+base URL.
+
+Upgrade both the control plane and daemons before issuing daemon-bound keys.
+The control plane applies the database migration on startup. Older daemons
+reject policies containing the new scope field and fail closed after their
+existing lease expires.
+
 ## Contract-first workflow
 
 [`contract/openapi.yaml`](../contract/openapi.yaml) is the source of truth for the
@@ -106,8 +133,8 @@ VITE_CONTROL_PLANE_URL=https://cp.example npm run build
 cors_allowed_origins = ["https://dashboard.example"]
 ```
 
-In virtual-key mode, enter the management credential in the dashboard's
+Enter the management credential in the dashboard's
 **Administrator token** form. It is sent as a bearer token, kept only in
 memory, and cleared on page reload. Never bake it into the Vite bundle.
-Legacy mode does not require it. See
+See
 [virtual-key deployment](../docs/virtual-keys.md).

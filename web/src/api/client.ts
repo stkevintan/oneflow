@@ -13,6 +13,35 @@ export type IssuedDaemonCredential = components["schemas"]["IssuedDaemonCredenti
 export type UsageEvent = components["schemas"]["UsageEvent"];
 export type UsageEventPage = components["schemas"]["UsageEventPage"];
 export type ErrorResponse = components["schemas"]["ErrorResponse"];
+export type VirtualKey = components["schemas"]["KeyMetadata"];
+export type GenerateKeyRequest = components["schemas"]["GenerateKeyRequest"];
+export type GenerateKeyResponse = components["schemas"]["GenerateKeyResponse"];
+
+export function generateVirtualKey(params: GenerateKeyRequest): Promise<GenerateKeyResponse> {
+  return requestJson<GenerateKeyResponse>("/key/generate", {
+    method: "POST", body: JSON.stringify(params), cache: "no-store",
+  });
+}
+
+export async function listVirtualKeys(daemonId: string, page: number, signal?: AbortSignal) {
+  const query = new URLSearchParams({
+    daemon_id: daemonId, page: String(page), size: "10", return_full_object: "true",
+  });
+  const result = await requestJson<components["schemas"]["KeyListResponse"]>(`/key/list?${query}`, {
+    signal, cache: "no-store",
+  });
+  const keys = result.keys.map((key) => {
+    if (typeof key === "string") throw new Error("Expected virtual-key metadata, received an identifier");
+    return key;
+  });
+  return { ...result, keys };
+}
+
+export function revokeVirtualKey(hash: string) {
+  return requestJson<components["schemas"]["DeleteKeysResponse"]>("/key/delete", {
+    method: "POST", body: JSON.stringify({ keys: [hash] }), cache: "no-store",
+  });
+}
 
 export interface UsageEventQuery {
   limit?: number;

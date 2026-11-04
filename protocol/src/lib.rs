@@ -79,6 +79,8 @@ pub enum DaemonMessage {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct VirtualKeyPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon_id: Option<String>,
     pub key_id: String,
     pub token_sha256: String,
     pub allowed_models: Vec<String>,
@@ -98,6 +100,7 @@ pub struct VirtualKeyPolicySnapshot {
 impl std::fmt::Debug for VirtualKeyPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VirtualKeyPolicy")
+            .field("daemon_id", &self.daemon_id)
             .field("key_id", &self.key_id)
             .field("allowed_models", &self.allowed_models)
             .field("expires_at", &self.expires_at)
@@ -183,6 +186,7 @@ mod virtual_key_tests {
             issued_at: 1000,
             valid_until: 1300,
             keys: vec![VirtualKeyPolicy {
+                daemon_id: None,
                 key_id: "a".repeat(32),
                 token_sha256: "b".repeat(64),
                 allowed_models: vec!["alias".into()],

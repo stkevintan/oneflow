@@ -74,6 +74,13 @@ Every frame is a JSON text frame with a `type` discriminator (`#[serde(tag = "ty
 | `Command` | `cmd`, `reason` | Reserved. Never sent by the control plane today; the daemon only logs it. |
 | `VirtualKeyPolicySnapshot` | `protocol_version`, `revision`, `issued_at`, `valid_until`, `keys[]` | Authenticated virtual-key deployments only; atomically replaces the leased authorization cache. |
 
+Each key policy includes its `key_id`, `token_sha256`, `allowed_models`,
+`expires_at`, and optional `daemon_id`. A non-null `daemon_id` restricts admission
+to that daemon's configured identity, even when other daemons receive the same
+snapshot. Absent/null scope means unbound cross-daemon access. Scope participates
+in equal-revision policy comparisons. Older daemons reject scoped policies;
+upgrade daemons before issuing scoped keys.
+
 ```json
 {"type":"ConfigUpdate","version":"poc-v1","models":[{"model_name":"deepseek-v4-flash","provider":"custom_openai","api_base":"https://api.deepseek.com/v1","parameters":{"api_key_env":"DEEPSEEK_API_KEY"}}]}
 ```

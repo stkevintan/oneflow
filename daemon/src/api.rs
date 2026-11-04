@@ -51,15 +51,15 @@ async fn require_api_key(
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
-    let principal =
-        match token {
-            Some(token) => state.policies.read().await.authenticate(
-                token,
-                now_ts(),
-                tokio::time::Instant::now(),
-            ),
-            None => Err(AuthFailure::InvalidKey),
-        };
+    let principal = match token {
+        Some(token) => state.policies.read().await.authenticate(
+            token,
+            now_ts(),
+            tokio::time::Instant::now(),
+            &state.settings.daemon_id,
+        ),
+        None => Err(AuthFailure::InvalidKey),
+    };
     match principal {
         Ok(principal) => {
             request.extensions_mut().insert(principal);
@@ -505,6 +505,15 @@ mod tests {
     }
 
     async fn grant(state: &AppState, revision: i64, keys: bool) {
+        grant_for_daemon(state, revision, keys, None).await;
+    }
+
+    async fn grant_for_daemon(
+        state: &AppState,
+        revision: i64,
+        keys: bool,
+        daemon_id: Option<&str>,
+    ) {
         use sha2::{Digest, Sha256};
         let snapshot = protocol::VirtualKeyPolicySnapshot {
             protocol_version: 1,
@@ -513,6 +522,7 @@ mod tests {
             valid_until: now_ts() + 300,
             keys: if keys {
                 vec![protocol::VirtualKeyPolicy {
+                    daemon_id: daemon_id.map(str::to_string),
                     key_id: "a".repeat(32),
                     token_sha256: format!("{:x}", Sha256::digest(virtual_token().as_bytes())),
                     allowed_models: vec![UPSTREAM_MODEL.into(), "removed".into()],
@@ -542,6 +552,32 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn daemon_binding_protects_all_inference_routes() {
+        let (state, app, mut rx) = virtual_harness(Router::new()).await;
+        grant_for_daemon(&state, 1, true, Some("another-daemon")).await;
+        for (method, path, body) in [
+            ("GET", "/v1/models", Value::Null),
+            ("GET", "/v1/models/demo-model", Value::Null),
+            (
+                "POST",
+                "/v1/chat/completions",
+                json!({"model": UPSTREAM_MODEL}),
+            ),
+        ] {
+            let response = virtual_call(app.clone(), method, path, body).await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        assert!(rx.try_recv().is_err());
+        grant_for_daemon(&state, 2, true, Some("test-daemon")).await;
+        assert_eq!(
+            virtual_call(app, "GET", "/v1/models", Value::Null)
+                .await
+                .status(),
+            StatusCode::OK
+        );
     }
 
     #[tokio::test]

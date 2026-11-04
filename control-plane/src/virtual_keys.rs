@@ -21,12 +21,14 @@ pub(crate) fn identifier_hash(identifier: &str) -> String {
 }
 
 pub(crate) struct CreateVirtualKey {
+    pub daemon_id: Option<String>,
     pub name: String,
     pub allowed_models: Vec<String>,
     pub expires_at: Option<i64>,
 }
 
 pub(crate) struct VirtualKey {
+    pub daemon_id: Option<String>,
     pub id: String,
     pub name: String,
     pub allowed_models: Vec<String>,
@@ -109,6 +111,18 @@ impl VirtualKeyStore {
 
         let mut tx = self.pool.begin().await?;
         lock_mutations(&mut tx).await?;
+        if let Some(daemon_id) = &request.daemon_id {
+            let active: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM daemon_credentials WHERE daemon_id = $1 AND revoked_at IS NULL)",
+            )
+            .bind(daemon_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            anyhow::ensure!(
+                active,
+                "daemon_id must identify an active provisioned daemon"
+            );
+        }
         let config_json: serde_json::Value =
             sqlx::query_scalar("SELECT config FROM virtual_model_config WHERE singleton = TRUE")
                 .fetch_one(&mut *tx)
@@ -131,8 +145,8 @@ impl VirtualKeyStore {
 
         sqlx::query(
             "INSERT INTO virtual_keys \
-             (id, name, token_sha256, allowed_models, created_at, expires_at, revoked_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, NULL)",
+             (id, name, token_sha256, allowed_models, created_at, expires_at, revoked_at, daemon_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, NULL, $7)",
         )
         .bind(&id)
         .bind(&request.name)
@@ -140,6 +154,7 @@ impl VirtualKeyStore {
         .bind(serde_json::to_value(&request.allowed_models)?)
         .bind(now)
         .bind(request.expires_at)
+        .bind(&request.daemon_id)
         .execute(&mut *tx)
         .await
         .context("failed to persist virtual key")?;
@@ -149,6 +164,7 @@ impl VirtualKeyStore {
 
         Ok(CreatedVirtualKey {
             key: VirtualKey {
+                daemon_id: request.daemon_id,
                 id,
                 name: request.name,
                 allowed_models: request.allowed_models,
@@ -162,7 +178,7 @@ impl VirtualKeyStore {
 
     pub async fn get(&self, id: &str) -> Result<Option<VirtualKey>> {
         let row = sqlx::query(
-            "SELECT id, name, allowed_models, created_at, expires_at, revoked_at \
+            "SELECT id, name, allowed_models, created_at, expires_at, revoked_at, daemon_id \
              FROM virtual_keys WHERE id = $1",
         )
         .bind(id)
@@ -200,19 +216,22 @@ impl VirtualKeyStore {
         &self,
         page: i64,
         size: i64,
+        daemon_id: Option<&str>,
     ) -> Result<(Vec<(VirtualKey, String)>, i64)> {
         let mut tx = self.pool.begin().await?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             .execute(&mut *tx)
             .await?;
         let total =
-            sqlx::query_scalar("SELECT count(*) FROM virtual_keys WHERE revoked_at IS NULL")
+            sqlx::query_scalar("SELECT count(*) FROM virtual_keys WHERE revoked_at IS NULL AND ($1::text IS NULL OR daemon_id = $1)")
+                .bind(daemon_id)
                 .fetch_one(&mut *tx)
                 .await?;
         let rows = sqlx::query(
-            "SELECT id, name, token_sha256, allowed_models, created_at, expires_at, revoked_at \
-             FROM virtual_keys WHERE revoked_at IS NULL ORDER BY created_at DESC, id DESC LIMIT $1 OFFSET $2"
+            "SELECT id, name, token_sha256, allowed_models, created_at, expires_at, revoked_at, daemon_id \
+             FROM virtual_keys WHERE revoked_at IS NULL AND ($3::text IS NULL OR daemon_id = $3) ORDER BY created_at DESC, id DESC LIMIT $1 OFFSET $2"
         ).bind(size).bind((page - 1).checked_mul(size).context("page overflow")?)
+            .bind(daemon_id)
             .fetch_all(&mut *tx).await?;
         let keys = rows
             .into_iter()
@@ -266,7 +285,7 @@ impl VirtualKeyStore {
                 .await
                 .context("failed to read virtual-key policy revision")?;
         let rows = sqlx::query(
-            "SELECT id, token_sha256, allowed_models, expires_at FROM virtual_keys \
+            "SELECT id, token_sha256, allowed_models, expires_at, daemon_id FROM virtual_keys \
              WHERE revoked_at IS NULL ORDER BY id",
         )
         .fetch_all(&mut *tx)
@@ -277,6 +296,7 @@ impl VirtualKeyStore {
             .map(|row| {
                 let allowed_models: serde_json::Value = row.try_get("allowed_models")?;
                 Ok(VirtualKeyPolicy {
+                    daemon_id: row.try_get("daemon_id")?,
                     key_id: row.try_get("id")?,
                     token_sha256: row.try_get("token_sha256")?,
                     allowed_models: serde_json::from_value(allowed_models)?,
@@ -303,6 +323,15 @@ impl VirtualKeyStore {
 }
 
 fn validate_key_request(request: &CreateVirtualKey, now: i64) -> Result<()> {
+    if request
+        .daemon_id
+        .as_deref()
+        .is_some_and(|id| !crate::daemon_credentials::valid_daemon_id(id))
+    {
+        anyhow::bail!(
+            "daemon_id must be 1-128 ASCII letters, digits, dots, underscores, or hyphens"
+        );
+    }
     if request.name.trim().is_empty() || request.name.chars().count() > 128 {
         anyhow::bail!("name must contain 1 to 128 non-blank characters");
     }
@@ -329,6 +358,7 @@ fn validate_key_request(request: &CreateVirtualKey, now: i64) -> Result<()> {
 fn row_to_key(row: sqlx::postgres::PgRow) -> Result<VirtualKey> {
     let allowed_models: serde_json::Value = row.try_get("allowed_models")?;
     Ok(VirtualKey {
+        daemon_id: row.try_get("daemon_id")?,
         id: row.try_get("id")?,
         name: row.try_get("name")?,
         allowed_models: serde_json::from_value(allowed_models)?,
@@ -367,6 +397,7 @@ mod tests {
 
     fn create_request() -> CreateVirtualKey {
         CreateVirtualKey {
+            daemon_id: None,
             name: "test".to_string(),
             allowed_models: vec!["model-a".to_string()],
             expires_at: None,
@@ -426,6 +457,7 @@ mod tests {
         let created = store
             .create(
                 CreateVirtualKey {
+                    daemon_id: None,
                     name: format!("integration-{}", uuid::Uuid::new_v4()),
                     allowed_models: vec![configured_model],
                     expires_at: None,
@@ -491,5 +523,52 @@ mod tests {
             .keys
             .iter()
             .all(|key| key.key_id != created.key.id));
+    }
+
+    #[tokio::test]
+    async fn postgres_daemon_bound_consumer_keys() {
+        let Ok(url) = std::env::var("ONEFLOW_TEST_DATABASE_URL") else {
+            eprintln!("Skipping daemon-bound key storage test: ONEFLOW_TEST_DATABASE_URL is unset");
+            return;
+        };
+        let store = VirtualKeyStore::connect(&url, &crate::store::default_config())
+            .await
+            .unwrap();
+        let model = store.config().await.unwrap().models[0].model_name.clone();
+        let daemon_a = format!("consumer-a-{}", uuid::Uuid::new_v4());
+        let daemon_b = format!("consumer-b-{}", uuid::Uuid::new_v4());
+        store.create_daemon(&daemon_a, 100).await.unwrap().unwrap();
+        store.create_daemon(&daemon_b, 100).await.unwrap().unwrap();
+        let request = |id: &str| CreateVirtualKey {
+            daemon_id: Some(id.to_string()),
+            name: "consumer".into(),
+            allowed_models: vec![model.clone()],
+            expires_at: None,
+        };
+        assert!(store.create(request("missing-daemon"), 100).await.is_err());
+        let created = store.create(request(&daemon_a), 100).await.unwrap();
+        assert_eq!(created.key.daemon_id.as_deref(), Some(daemon_a.as_str()));
+        assert_eq!(
+            store.get(&created.key.id).await.unwrap().unwrap().daemon_id,
+            Some(daemon_a.clone())
+        );
+        let (keys, count) = store.list_page(1, 10, Some(&daemon_a)).await.unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(keys[0].0.id, created.key.id);
+        assert_eq!(store.list_page(1, 10, Some(&daemon_b)).await.unwrap().1, 0);
+        let snapshot = store.snapshot(101).await.unwrap();
+        assert_eq!(
+            snapshot
+                .keys
+                .iter()
+                .find(|key| key.key_id == created.key.id)
+                .unwrap()
+                .daemon_id,
+            Some(daemon_a.clone())
+        );
+        store.revoke_daemon(&daemon_a, 102).await.unwrap();
+        assert!(store.create(request(&daemon_a), 103).await.is_err());
+        store.delete_keys(&[created.secret], 104).await.unwrap();
+        assert_eq!(store.list_page(1, 10, Some(&daemon_a)).await.unwrap().1, 0);
     }
 }
