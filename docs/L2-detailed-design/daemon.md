@@ -127,7 +127,9 @@ appends `/chat/completions` unless it is already present.
 
 1. If `api_key_env` is set, read the named environment variable on the daemon
    host; missing or blank values return 503 without trying a literal fallback.
-2. Otherwise use `api_key`, the literal value from the model config.
+2. Otherwise use `api_key`, the literal value from the model config. The
+   control plane never returns it through its management API, but sends it to
+   daemons in `ConfigUpdate`.
 3. With neither, send no upstream Authorization header. Client virtual keys
    are never forwarded to providers.
 
@@ -183,8 +185,8 @@ accounting during streaming, and health/model lookup. `main.rs`
 
 ## Known gaps
 
-- `api_key` values arrive over the control channel in plaintext; prefer
-  `api_key_env`.
+- `api_key` values arrive over the control channel, which is plaintext unless
+  TLS is terminated in front of the control plane; prefer `api_key_env`.
 - `include_usage` is not in the parameter skip list, so when set it is also
   copied into the request body as a top-level field.
 - No retries, fallbacks, or load balancing across several `api_base` values.

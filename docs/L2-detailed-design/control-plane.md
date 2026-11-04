@@ -40,8 +40,8 @@ Presence and recent usage remain process-local. See
 | --- | --- | --- | --- |
 | GET | `/v1/health` | `health` | Liveness: `{ status: "ok", version }`. Declared unauthenticated in the contract. |
 | GET | `/v1/status` | `status` | Summary: `{ version, uptime_seconds, connected_daemons, config_version }`. |
-| GET | `/v1/config` | `get_config` | Current desired `ModelConfigSet`. |
-| PUT | `/v1/config` | `put_config` | Validates, stores, and broadcasts the full set; returns it. |
+| GET | `/v1/config` | `get_config` | Current desired `ModelConfigSet`, with provider keys redacted (see below). |
+| PUT | `/v1/config` | `put_config` | Validates, merges write-only keys, stores, and broadcasts the full set; returns it redacted. |
 | GET | `/v1/daemons` | `list_daemons` | `DaemonList { items }`, ordered by `connection_id`. |
 | POST | `/v1/daemons` | Daemon credentials | Provision a unique daemon ID; 201 with one-time token. |
 | GET | `/v1/daemons/credentials` | Daemon credentials | Durable metadata including offline/revoked daemons; no token/hash. |
@@ -69,6 +69,25 @@ Rejected with `400 { "error": … }` when:
 - any model has a blank `model_name` or `api_base`.
 
 Provider names and `parameters` are not validated by the control plane.
+
+### Write-only provider keys (`config_secrets`)
+
+A literal `parameters.api_key` must reach daemons, so the stored config and
+the `ConfigUpdate` broadcast keep it. The management API never returns it:
+
+- **Responses** (`GET` and the `PUT` echo) go through `redact`, which removes
+  `api_key` and sets `api_key_configured` to whether a non-empty key is stored.
+- **`PUT`** goes through `merge` against the stored config, matched by
+  `model_name`: `api_key` omitted keeps the stored key, `""` removes it, any
+  other value replaces it. A renamed model does not inherit the old name's key.
+  `api_key_configured` sent by a client is discarded and never stored or
+  broadcast.
+
+The merge reads and writes in one transaction under the same advisory lock as
+key creation (`VirtualKeyStore::replace_config`), so concurrent `PUT`s cannot
+resurrect or drop a key. This lets an operator read a config, edit it, and send
+it back without re-entering keys. `api_key_env` remains preferred: it keeps the
+secret off the control plane entirely.
 
 ### Usage paging (`list_usage_events`)
 
@@ -190,6 +209,7 @@ daemon and usage events:
 | `every_contract_operation_is_routed` | Every operation in `openapi.yaml` reaches a real handler |
 | `every_get_response_matches_its_contract_schema` | Each GET 200 body has every contract-required field, recursively through `$ref`s |
 | `config_put_round_trips_and_is_reported_in_status` | A PUT is visible in `GET /v1/config` and `/v1/status` |
+| `provider_api_key_is_write_only_but_reaches_daemons` | `api_key` is never in GET/PUT bodies, survives a GET→PUT round trip, is broadcast to daemons, and `""` removes it |
 | `invalid_config_is_a_json_400` | Validation and malformed JSON both return `ErrorResponse` |
 | `daemon_lookup_returns_the_record_or_a_json_404` | `GET /v1/daemons/{id}` |
 | `usage_events_page_newest_first_with_filters` | Ordering, cursor, and filters |
@@ -198,8 +218,10 @@ daemon and usage events:
 | `cors_is_only_granted_to_configured_origins` | Allowed, denied, and disabled CORS |
 
 `store::tests` cover bounded history, paging, filter-before-limit, null
-serialization, and messages for unknown connections. The WebSocket path is not
-covered by automated tests.
+serialization, and messages for unknown connections. `config_secrets::tests`
+cover redaction and the keep/replace/remove merge rules, including that a
+renamed model does not inherit a key. The WebSocket path is not covered by
+automated tests.
 
 ## Known gaps
 

@@ -67,11 +67,23 @@ pub struct ModelConfigSet {
 pub struct ModelConfig {
     ///Upstream base URL, for example `https://api.deepseek.com/v1`. Must be non-empty.
     pub api_base: String,
+    /**Whether a literal upstream `api_key` is stored for this model.
+The management API returns this in place of the key itself; it is
+ignored on input.
+*/
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_configured: Option<bool>,
     ///Model identifier clients send to the daemon. Must be non-empty.
     pub model_name: String,
     /**Free-form provider options. `upstream_model` rewrites the model id
 sent upstream; `api_key_env` names an environment variable holding
-the upstream credential on the daemon host.
+the upstream credential on the daemon host (preferred).
+
+`api_key` is a literal upstream credential and is write-only: the
+management API never returns it. On `PUT /v1/config`, omitting
+`api_key` keeps the key already stored for the same `model_name`,
+and an empty string removes it. Daemons still receive it over the
+authenticated control channel.
 */
     pub parameters: ModelConfigParameters,
     ///Provider adapter, for example `custom_openai`.
@@ -79,7 +91,13 @@ the upstream credential on the daemon host.
 }
 /**Free-form provider options. `upstream_model` rewrites the model id
 sent upstream; `api_key_env` names an environment variable holding
-the upstream credential on the daemon host.
+the upstream credential on the daemon host (preferred).
+
+`api_key` is a literal upstream credential and is write-only: the
+management API never returns it. On `PUT /v1/config`, omitting
+`api_key` keeps the key already stored for the same `model_name`,
+and an empty string removes it. Daemons still receive it over the
+authenticated control channel.
 */
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ModelConfigParameters {

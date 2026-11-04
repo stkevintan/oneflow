@@ -335,6 +335,7 @@ mod tests {
             model_name: "m".into(),
             provider: "custom_openai".into(),
             api_base: "https://example.test/v1".into(),
+            api_key_configured: None,
             parameters: ModelConfigParameters::new(),
         };
 

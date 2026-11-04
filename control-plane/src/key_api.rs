@@ -341,6 +341,7 @@ mod tests {
         let Ok(url) = std::env::var("ONEFLOW_TEST_DATABASE_URL") else {
             return;
         };
+        let _config_lock = crate::SHARED_CONFIG_TEST_LOCK.lock().await;
         let store = Arc::new(
             crate::virtual_keys::VirtualKeyStore::connect(&url, &crate::store::default_config())
                 .await

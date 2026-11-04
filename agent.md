@@ -123,9 +123,9 @@ contract/openapi.yaml                 source of truth, edited first
 - Earlier end-to-end checks still hold: config pushed through `PUT /v1/config` is broadcast, a live
   daemon immediately serves the new model list, `upstream_model` rewrites the model id sent
   upstream, and `api_key_env` injects the upstream bearer token
-- `cargo test --workspace` passes: 28 control-plane, 32 daemon, 2 protocol, and 6
+- `cargo test --workspace` passes: 32 control-plane, 32 daemon, 2 protocol, and 6
   config-provider tests; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets`,
-  `scripts/generate-types.sh --check`, `npm test` (17), `npm run typecheck` and `npm run build`
+  `scripts/generate-types.sh --check`, `npm test` (18), `npm run typecheck` and `npm run build`
   pass. The PostgreSQL-backed control-plane tests are skipped unless
   `ONEFLOW_TEST_DATABASE_URL` is set; they pass against a throwaway `postgres:16` container.
   Smoke-tested end to end: control plane + daemon + `vite preview`, config PUT reached the
@@ -188,8 +188,10 @@ address. The inference routes use fixed paths such as `/v1/chat/completions`.
 1. **Contract-first resources**: ✅ v1 API done (`/v1/config`, `/v1/daemons`, paginated
    `/v1/usage/events`) and the declared bearer auth is enforced (ADR 0001 step 2). Still open:
    per-model CRUD (`/v1/models/{model_name}`), daemon commands, and config history/rollback.
-2. **Secrets**: `parameters.api_key` is plaintext today, in the contract, in memory, and in the
-   WebSocket broadcast. Make it `writeOnly` and never echo it; prefer `api_key_env`.
+2. **Secrets**: ✅ `parameters.api_key` is write-only through the management API: never
+   returned (responses carry `api_key_configured`), kept when a `PUT` omits it, removed by
+   `""`. Still open: it is stored unencrypted in PostgreSQL and crosses the control channel,
+   so it is only as safe as the database and transport; `api_key_env` remains preferred.
 3. **Virtual keys**: ✅ control-plane-issued client keys (`/key/*`) with leased policy snapshots
    replace the daemon-local `DAEMON_API_KEYS` scaffolding; keys can be bound to one daemon.
 4. **Persistence**: ✅ PostgreSQL holds model configuration, virtual keys, and daemon credentials

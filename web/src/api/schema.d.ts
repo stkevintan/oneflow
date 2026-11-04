@@ -56,6 +56,12 @@ export interface paths {
          *     every connected daemon. Daemons that connect later receive it on
          *     connect. The whole configuration is replaced; models absent from the
          *     body are removed from every daemon.
+         *
+         *     Literal `parameters.api_key` values are write-only. A model that omits
+         *     `api_key` keeps the key stored for the same `model_name`, so a body
+         *     read from `GET /v1/config` can be edited and sent back unchanged; an
+         *     empty `api_key` removes it. The response, like `GET`, reports
+         *     `api_key_configured` instead of the key.
          */
         put: operations["putConfig"];
         post?: never;
@@ -405,9 +411,21 @@ export interface components {
              */
             api_base: string;
             /**
+             * @description Whether a literal upstream `api_key` is stored for this model.
+             *     The management API returns this in place of the key itself; it is
+             *     ignored on input.
+             */
+            readonly api_key_configured?: boolean;
+            /**
              * @description Free-form provider options. `upstream_model` rewrites the model id
              *     sent upstream; `api_key_env` names an environment variable holding
-             *     the upstream credential on the daemon host.
+             *     the upstream credential on the daemon host (preferred).
+             *
+             *     `api_key` is a literal upstream credential and is write-only: the
+             *     management API never returns it. On `PUT /v1/config`, omitting
+             *     `api_key` keeps the key already stored for the same `model_name`,
+             *     and an empty string removes it. Daemons still receive it over the
+             *     authenticated control channel.
              */
             parameters: {
                 [key: string]: string;
