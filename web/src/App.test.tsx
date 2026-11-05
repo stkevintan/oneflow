@@ -120,6 +120,14 @@ function stubApi() {
   return fetchMock;
 }
 
+/** The raw JSON editor sits behind a disclosure under the model list. */
+async function openRawEditor(): Promise<HTMLTextAreaElement> {
+  fireEvent.click(await screen.findByRole("button", { name: /Edit raw JSON/ }));
+  const editor = screen.getByLabelText("Model configuration JSON") as HTMLTextAreaElement;
+  await waitFor(() => expect(editor.value).not.toBe(""));
+  return editor;
+}
+
 describe("dashboard", () => {
   afterEach(() => {
     setAdminToken("");
@@ -141,10 +149,10 @@ describe("dashboard", () => {
     // The daemon last applied smoke-v0 while smoke-v1 is desired.
     expect(screen.getByText("Pending").getAttribute("title")).toBe("Last applied smoke-v0");
     expect(screen.getByText("smoke-v0")).toBeTruthy();
-    await waitFor(() => {
-      const editor = screen.getByLabelText("Model configuration JSON") as HTMLTextAreaElement;
-      expect(JSON.parse(editor.value).version).toBe("smoke-v1");
-    });
+    expect(await screen.findByRole("rowheader", { name: "demo-model" })).toBeTruthy();
+    expect(screen.getByText("demo-upstream")).toBeTruthy();
+    expect(screen.getByText("stored key")).toBeTruthy();
+    expect(JSON.parse((await openRawEditor()).value).version).toBe("smoke-v1");
 
     const urls = fetchMock.mock.calls.map(([url]) => url);
     expect(urls).toContain("/v1/status");
@@ -161,8 +169,7 @@ describe("dashboard", () => {
 
     render(<App />);
 
-    const editor = (await screen.findByLabelText("Model configuration JSON")) as HTMLTextAreaElement;
-    await waitFor(() => expect(editor.value).not.toBe(""));
+    const editor = await openRawEditor();
     const edited = { ...CONFIG, version: "smoke-v2" };
     fireEvent.change(editor, { target: { value: JSON.stringify(edited) } });
     fireEvent.click(screen.getByRole("button", { name: "Push configuration" }));
@@ -177,8 +184,7 @@ describe("dashboard", () => {
     const fetchMock = stubApi();
     render(<App />);
 
-    const editor = (await screen.findByLabelText("Model configuration JSON")) as HTMLTextAreaElement;
-    await waitFor(() => expect(editor.value).not.toBe(""));
+    const editor = await openRawEditor();
     expect(editor.value).toContain('"api_key_configured": true');
     expect(editor.value).not.toContain('"api_key":');
     expect(screen.getByText(/values are write-only and never shown here/)).toBeTruthy();
@@ -192,6 +198,24 @@ describe("dashboard", () => {
     const sent = JSON.parse(String(put?.[1]?.body)) as ModelConfigSet;
     // Omitting api_key is what tells the control plane to keep the stored one.
     expect(sent.models[0]?.parameters).toEqual({ upstream_model: "demo-upstream" });
+  });
+
+  it("filters recent usage by daemon and model through the API", async () => {
+    const fetchMock = stubApi();
+    render(<App />);
+    const daemon = (await screen.findByLabelText("Daemon")) as HTMLSelectElement;
+    await screen.findByRole("option", { name: "daemon-poc-001" });
+    fireEvent.change(daemon, { target: { value: "daemon-poc-001" } });
+    fireEvent.change(screen.getByLabelText("Model"), { target: { value: "demo-model" } });
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.map(([url]) => url)).toContain(
+        "/v1/usage/events?limit=25&daemon_id=daemon-poc-001&model_name=demo-model",
+      );
+    });
+    expect(screen.getByText(/events matching the filters/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
+    expect(daemon.value).toBe("");
+    expect(screen.queryByRole("button", { name: "Clear filters" })).toBeNull();
   });
 
   it("sends an administrator token without persisting it in the form", async () => {

@@ -125,7 +125,7 @@ contract/openapi.yaml                 source of truth, edited first
   upstream, and `api_key_env` injects the upstream bearer token
 - `cargo test --workspace` passes: 34 control-plane, 33 daemon, 3 protocol, and 6
   config-provider tests; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets`,
-  `scripts/generate-types.sh --check`, `npm test` (18), `npm run typecheck` and `npm run build`
+  `scripts/generate-types.sh --check`, `npm test` (27), `npm run typecheck` and `npm run build`
   pass. The PostgreSQL-backed control-plane tests are skipped unless
   `ONEFLOW_TEST_DATABASE_URL` is set; they pass against a throwaway `postgres:16` container.
   Smoke-tested end to end: control plane + daemon + `vite preview`, config PUT reached the
@@ -199,8 +199,8 @@ address. The inference routes use fixed paths such as `/v1/chat/completions`.
 5. **Desired vs applied**: ✅ `ConfigUpdate` carries a content digest, the daemon answers with
    `ConfigAck`, and `/v1/daemons` reports `applied_config_version` and `config_in_sync`, shown
    as In sync/Pending on the dashboard. Daemons from before this never ack and read as pending.
-6. **Dashboard**: model list + form instead of the raw-JSON editor, telemetry filters. Key
-   management per daemon is done.
+6. **Dashboard**: ✅ model list with an add/edit form (raw JSON kept under "Edit raw JSON"),
+   usage filters by daemon and model, and key management per daemon.
 
 **Then**
 7. **Improve reconnection logic**: Replace the fixed retry delay with exponential backoff and jitter.

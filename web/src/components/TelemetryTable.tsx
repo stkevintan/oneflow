@@ -6,6 +6,8 @@ interface TelemetryTableProps {
   /** Newest first, as returned by `GET /v1/usage/events`. */
   events: UsageEvent[];
   limit?: number;
+  /** Whether a filter narrows `events`, for the empty-state wording. */
+  filtered?: boolean;
 }
 
 const HEADERS = [
@@ -47,7 +49,7 @@ function TokenCell({
   );
 }
 
-export function TelemetryTable({ events, limit = 25 }: TelemetryTableProps) {
+export function TelemetryTable({ events, limit = 25, filtered = false }: TelemetryTableProps) {
   const recent = events.slice(0, limit);
 
   return (
@@ -114,7 +116,9 @@ export function TelemetryTable({ events, limit = 25 }: TelemetryTableProps) {
           </tbody>
         </table>
       </div>
-      <EmptyState visible={recent.length === 0}>No telemetry received yet.</EmptyState>
+      <EmptyState visible={recent.length === 0}>
+        {filtered ? "No usage events match these filters." : "No telemetry received yet."}
+      </EmptyState>
     </>
   );
 }
