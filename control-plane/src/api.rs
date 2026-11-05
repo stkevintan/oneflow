@@ -234,7 +234,7 @@ async fn put_config(
 
     let receivers = state
         .broadcast
-        .send(ControlMessage::from(config.clone()))
+        .send(crate::store::config_message(config.clone()))
         .unwrap_or(0);
     info!(
         version = %config.version,

@@ -794,6 +794,8 @@ components:
         - total_completion_tokens
         - auth_policy_revision
         - auth_policy_valid_until
+        - applied_config_version
+        - config_in_sync
       properties:
         connection_id:
           type: string
@@ -852,6 +854,18 @@ components:
           type: [integer, "null"]
           format: int64
           description: Last acknowledged policy lease deadline, in Unix seconds.
+        applied_config_version:
+          type: [string, "null"]
+          description: |
+            Version label of the model configuration this daemon last
+            acknowledged applying, or null before its first acknowledgement
+            (daemons from before configuration acknowledgements never send one).
+        config_in_sync:
+          type: boolean
+          description: |
+            True when the daemon has acknowledged the current desired model
+            configuration. Compared by content, not by version label, so a
+            reused label for a different configuration still reads as pending.
 
     UsageEventPage:
       type: object

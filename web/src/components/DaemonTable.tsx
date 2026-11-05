@@ -15,8 +15,32 @@ const HEADERS = [
   "Requests",
   "Tokens",
   "Models",
+  "Config",
   "Last seen",
 ] as const;
+
+/** Whether a daemon has acknowledged the current desired model configuration. */
+function ConfigSync({ daemon }: { daemon: Daemon }) {
+  if (daemon.config_in_sync) {
+    return (
+      <span className="rounded-full border border-emerald-700/60 bg-emerald-950/40 px-2 py-0.5 text-xs text-emerald-300">
+        In sync
+      </span>
+    );
+  }
+  return (
+    <span
+      className="rounded-full border border-amber-700/60 bg-amber-950/40 px-2 py-0.5 text-xs text-amber-300"
+      title={
+        daemon.applied_config_version === null
+          ? "No configuration acknowledgement received yet"
+          : `Last applied ${daemon.applied_config_version}`
+      }
+    >
+      Pending
+    </span>
+  );
+}
 
 export function DaemonTable({ daemons }: DaemonTableProps) {
   return (
@@ -79,6 +103,12 @@ export function DaemonTable({ daemons }: DaemonTableProps) {
                         </span>
                       ))}
                     </div>
+                  )}
+                </td>
+                <td className="whitespace-nowrap border-b border-slate-800/70 px-3 py-2 text-slate-300">
+                  <ConfigSync daemon={daemon} />
+                  {daemon.applied_config_version !== null && (
+                    <span className="ml-2 font-mono text-[11px] text-slate-500">{daemon.applied_config_version}</span>
                   )}
                 </td>
                 <td

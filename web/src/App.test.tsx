@@ -31,6 +31,8 @@ const DAEMONS: DaemonList = {
       total_completion_tokens: 240,
       auth_policy_revision: null,
       auth_policy_valid_until: null,
+      applied_config_version: "smoke-v0",
+      config_in_sync: false,
     },
   ],
 };
@@ -136,6 +138,9 @@ describe("dashboard", () => {
     expect(daemonIds.length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("cluster-ssh198")).toBeTruthy();
     expect(screen.getAllByText("demo-model").length).toBeGreaterThan(0);
+    // The daemon last applied smoke-v0 while smoke-v1 is desired.
+    expect(screen.getByText("Pending").getAttribute("title")).toBe("Last applied smoke-v0");
+    expect(screen.getByText("smoke-v0")).toBeTruthy();
     await waitFor(() => {
       const editor = screen.getByLabelText("Model configuration JSON") as HTMLTextAreaElement;
       expect(JSON.parse(editor.value).version).toBe("smoke-v1");

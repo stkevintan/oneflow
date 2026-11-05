@@ -86,6 +86,7 @@ sequenceDiagram
     CP->>CP: validate bound identity and policy capability
     CP-->>D: ConfigUpdate + leased key policy snapshot
     D->>D: apply ConfigUpdate (replace model table)
+    D->>CP: ConfigAck (version, digest)
     loop every 5 s
         D->>CP: Heartbeat (active_requests, loaded_models)
     end

@@ -65,6 +65,8 @@ stateDiagram-v2
 
 - **`ConfigUpdate`** replaces the whole model table and updates
   `models_updated_at`. Models absent from the update disappear immediately.
+  When the update carries a `digest`, the daemon replies with
+  `ConfigAck { version, digest }`.
 - **`Command`** is logged only.
 - The heartbeat interval uses `MissedTickBehavior::Delay`, so a slow socket does
   not cause a burst of heartbeats.
