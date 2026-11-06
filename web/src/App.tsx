@@ -4,6 +4,7 @@ import { Card } from "./components/Card";
 import { DaemonTable } from "./components/DaemonTable";
 import { DaemonCredentials } from "./components/DaemonCredentials";
 import { DaemonDetails } from "./components/DaemonDetails";
+import { ConfigHistory } from "./components/ConfigHistory";
 import { ModelList } from "./components/ModelList";
 import { TelemetryTable } from "./components/TelemetryTable";
 import { Topbar } from "./components/Topbar";
@@ -136,6 +137,7 @@ export default function App() {
             </Card>
 
             <ModelList config={snapshot?.config ?? null} onPushed={refresh} />
+            <ConfigHistory config={snapshot?.config ?? null} onRolledBack={refresh} />
           </>
         )}
       </main>

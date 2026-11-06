@@ -41,7 +41,9 @@ Presence and recent usage remain process-local. See
 | GET | `/v1/health` | `health` | Liveness: `{ status: "ok", version }`. Declared unauthenticated in the contract. |
 | GET | `/v1/status` | `status` | Summary: `{ version, uptime_seconds, connected_daemons, config_version }`. |
 | GET | `/v1/config` | `get_config` | Current desired `ModelConfigSet`, with provider keys redacted (see below). |
-| PUT | `/v1/config` | `put_config` | Validates, merges write-only keys, stores, and broadcasts the full set; returns it redacted. |
+| PUT | `/v1/config` | `put_config` | Validates, merges write-only keys, stores, records history, and broadcasts the full set; returns it redacted. |
+| GET | `/v1/config/history` | `list_config_history` | `ConfigHistoryPage`, newest first, key-free (see below). |
+| POST | `/v1/config/history/{id}/rollback` | `rollback_config` | Restore entry `id` under a new `version`, like a PUT; JSON 404 for an unknown id. |
 | GET | `/v1/daemons` | `list_daemons` | `DaemonList { items }`, ordered by `connection_id`. |
 | POST | `/v1/daemons` | Daemon credentials | Provision a unique daemon ID; 201 with one-time token. |
 | GET | `/v1/daemons/credentials` | Daemon credentials | Durable metadata including offline/revoked daemons; no token/hash. |
@@ -88,6 +90,26 @@ key creation (`VirtualKeyStore::replace_config`), so concurrent `PUT`s cannot
 resurrect or drop a key. This lets an operator read a config, edit it, and send
 it back without re-entering keys. `api_key_env` remains preferred: it keeps the
 secret off the control plane entirely.
+
+### Configuration history (`model_config_history`)
+
+Every stored configuration gets a row in the same transaction as the write
+(`VirtualKeyStore::replace_config` / `rollback_config`): `version`, `created_at`,
+`source` (`initial`, `put`, `rollback`), `rolled_back_from`, and the config.
+`connect` seeds an `initial` row from the current config when the table is
+empty. Only the latest 100 rows (`CONFIG_HISTORY_LIMIT`) are kept.
+
+- **No keys in history.** Rows store the config after `redact` (and without
+  `api_key_configured`), so a removed key does not survive in history.
+  `GET /v1/config/history` reports, per model, whether a key is stored *now*
+  for its `model_name`: the key a rollback would use.
+- **Rollback** loads the row, sets the requested `version`, and runs the same
+  `merge` against the current config as a PUT, so each model keeps the key
+  currently stored for its name. A model whose key has since been removed comes
+  back without one; the dashboard warns before rolling back. The result is
+  broadcast like a PUT and recorded as a `rollback` row.
+- Paging: `limit` 1..=100 (default 20); `cursor` is the last row's id from the
+  previous page (`next_cursor`). Malformed values → 400.
 
 ### Usage paging (`list_usage_events`)
 
@@ -216,6 +238,7 @@ daemon and usage events:
 | `every_contract_operation_is_routed` | Every operation in `openapi.yaml` reaches a real handler |
 | `every_get_response_matches_its_contract_schema` | Each GET 200 body has every contract-required field, recursively through `$ref`s |
 | `config_put_round_trips_and_is_reported_in_status` | A PUT is visible in `GET /v1/config` and `/v1/status` |
+| `config_history_records_writes_and_rolls_back` | Stored history is key-free, oldest are pruned, rollback restores models under a new version, reuses stored keys, reaches daemons, and is itself recorded |
 | `provider_api_key_is_write_only_but_reaches_daemons` | `api_key` is never in GET/PUT bodies, survives a GET→PUT round trip, is broadcast to daemons, and `""` removes it |
 | `invalid_config_is_a_json_400` | Validation and malformed JSON both return `ErrorResponse` |
 | `daemon_lookup_returns_the_record_or_a_json_404` | `GET /v1/daemons/{id}` |
