@@ -11,6 +11,36 @@ use sqlx::{
 
 const POLICY_LEASE_SECONDS: i64 = 300;
 const ADVISORY_LOCK_ID: i64 = 0x4f4e_4546_4c4f_5701;
+/// Configurations kept in `model_config_history`; older ones are pruned.
+pub(crate) const CONFIG_HISTORY_LIMIT: i64 = 100;
+
+/// How a configuration entered history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfigSource {
+    Initial,
+    Put,
+    Rollback,
+}
+
+impl ConfigSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Initial => "initial",
+            Self::Put => "put",
+            Self::Rollback => "rollback",
+        }
+    }
+}
+
+/// One stored configuration, redacted.
+pub(crate) struct ConfigHistoryEntry {
+    pub id: i64,
+    pub version: String,
+    pub created_at: i64,
+    pub source: String,
+    pub rolled_back_from: Option<i64>,
+    pub config: ModelConfigSet,
+}
 
 pub(crate) fn identifier_hash(identifier: &str) -> String {
     if identifier.starts_with("sk-") || identifier.starts_with("ofk_") {
@@ -69,6 +99,27 @@ impl VirtualKeyStore {
         .await
         .context("failed to initialize durable model configuration")?;
 
+        // Seed history with whatever is current when history starts (a new
+        // database, or one from before history existed).
+        let mut tx = pool.begin().await?;
+        lock_mutations(&mut tx).await?;
+        let empty: bool =
+            sqlx::query_scalar("SELECT NOT EXISTS (SELECT 1 FROM model_config_history)")
+                .fetch_one(&mut *tx)
+                .await?;
+        if empty {
+            let current = read_config(&mut tx).await?;
+            record_history(
+                &mut tx,
+                &current,
+                ConfigSource::Initial,
+                None,
+                crate::now_ts(),
+            )
+            .await?;
+        }
+        tx.commit().await?;
+
         Ok(Self { pool })
     }
 
@@ -90,24 +141,61 @@ impl VirtualKeyStore {
     pub async fn replace_config(&self, incoming: ModelConfigSet) -> Result<ModelConfigSet> {
         let mut tx = self.pool.begin().await?;
         lock_mutations(&mut tx).await?;
-        let current: serde_json::Value =
-            sqlx::query_scalar("SELECT config FROM virtual_model_config WHERE singleton = TRUE")
-                .fetch_one(&mut *tx)
-                .await
-                .context("failed to read durable model configuration")?;
-        let current: ModelConfigSet =
-            serde_json::from_value(current).context("durable model configuration is invalid")?;
+        let current = read_config(&mut tx).await?;
         let config = crate::config_secrets::merge(incoming, &current);
-        sqlx::query("UPDATE virtual_model_config SET config = $1 WHERE singleton = TRUE")
-            .bind(serde_json::to_value(&config)?)
-            .execute(&mut *tx)
-            .await
-            .context("failed to persist model configuration")?;
-        sqlx::query("SELECT pg_notify('oneflow_model_config', 'refresh')")
-            .execute(&mut *tx)
-            .await?;
+        write_config(&mut tx, &config, ConfigSource::Put, None).await?;
         tx.commit().await?;
         Ok(config)
+    }
+
+    /// Stored configurations, newest first, at most `limit`, older than
+    /// `before` when given.
+    pub(crate) async fn config_history(
+        &self,
+        limit: i64,
+        before: Option<i64>,
+    ) -> Result<Vec<ConfigHistoryEntry>> {
+        let rows = sqlx::query(
+            "SELECT id, version, config, created_at, source, rolled_back_from \
+             FROM model_config_history WHERE ($2::BIGINT IS NULL OR id < $2) \
+             ORDER BY id DESC LIMIT $1",
+        )
+        .bind(limit)
+        .bind(before)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to read model configuration history")?;
+        rows.into_iter().map(history_entry).collect()
+    }
+
+    /// Make history entry `id` the current configuration again, under
+    /// `version`. Its models are restored as they were; literal `api_key`
+    /// values are not in history, so each model keeps the key currently
+    /// stored for its `model_name` (if any). Returns `None` when `id` is not
+    /// in history, else the stored (unredacted) configuration.
+    pub(crate) async fn rollback_config(
+        &self,
+        id: i64,
+        version: String,
+    ) -> Result<Option<ModelConfigSet>> {
+        let mut tx = self.pool.begin().await?;
+        lock_mutations(&mut tx).await?;
+        let target: Option<serde_json::Value> =
+            sqlx::query_scalar("SELECT config FROM model_config_history WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some(target) = target else {
+            return Ok(None);
+        };
+        let mut target: ModelConfigSet =
+            serde_json::from_value(target).context("history entry is invalid")?;
+        target.version = version;
+        let current = read_config(&mut tx).await?;
+        let config = crate::config_secrets::merge(target, &current);
+        write_config(&mut tx, &config, ConfigSource::Rollback, Some(id)).await?;
+        tx.commit().await?;
+        Ok(Some(config))
     }
 
     pub async fn create(&self, request: CreateVirtualKey, now: i64) -> Result<CreatedVirtualKey> {
@@ -377,6 +465,81 @@ fn row_to_key(row: sqlx::postgres::PgRow) -> Result<VirtualKey> {
         created_at: row.try_get("created_at")?,
         expires_at: row.try_get("expires_at")?,
         revoked_at: row.try_get("revoked_at")?,
+    })
+}
+
+async fn read_config(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> Result<ModelConfigSet> {
+    let current: serde_json::Value =
+        sqlx::query_scalar("SELECT config FROM virtual_model_config WHERE singleton = TRUE")
+            .fetch_one(&mut **tx)
+            .await
+            .context("failed to read durable model configuration")?;
+    serde_json::from_value(current).context("durable model configuration is invalid")
+}
+
+/// Store `config` as current, record it in history and tell other replicas.
+async fn write_config(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    config: &ModelConfigSet,
+    source: ConfigSource,
+    rolled_back_from: Option<i64>,
+) -> Result<()> {
+    sqlx::query("UPDATE virtual_model_config SET config = $1 WHERE singleton = TRUE")
+        .bind(serde_json::to_value(config)?)
+        .execute(&mut **tx)
+        .await
+        .context("failed to persist model configuration")?;
+    record_history(tx, config, source, rolled_back_from, crate::now_ts()).await?;
+    sqlx::query("SELECT pg_notify('oneflow_model_config', 'refresh')")
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Append a redacted copy of `config` to history and prune the oldest entries.
+async fn record_history(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    config: &ModelConfigSet,
+    source: ConfigSource,
+    rolled_back_from: Option<i64>,
+    now: i64,
+) -> Result<()> {
+    let mut redacted = crate::config_secrets::redact(config.clone());
+    for model in &mut redacted.models {
+        model.api_key_configured = None;
+    }
+    sqlx::query(
+        "INSERT INTO model_config_history (version, config, created_at, source, rolled_back_from) \
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(&redacted.version)
+    .bind(serde_json::to_value(&redacted)?)
+    .bind(now)
+    .bind(source.as_str())
+    .bind(rolled_back_from)
+    .execute(&mut **tx)
+    .await
+    .context("failed to record model configuration history")?;
+    sqlx::query(
+        "DELETE FROM model_config_history WHERE id <= \
+         (SELECT id FROM model_config_history ORDER BY id DESC OFFSET $1 LIMIT 1)",
+    )
+    .bind(CONFIG_HISTORY_LIMIT)
+    .execute(&mut **tx)
+    .await
+    .context("failed to prune model configuration history")?;
+    Ok(())
+}
+
+fn history_entry(row: sqlx::postgres::PgRow) -> Result<ConfigHistoryEntry> {
+    Ok(ConfigHistoryEntry {
+        id: row.try_get("id")?,
+        version: row.try_get("version")?,
+        created_at: row.try_get("created_at")?,
+        source: row.try_get("source")?,
+        rolled_back_from: row.try_get("rolled_back_from")?,
+        config: serde_json::from_value(row.try_get("config")?)
+            .context("history entry is invalid")?,
     })
 }
 

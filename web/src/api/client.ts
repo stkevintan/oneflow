@@ -5,6 +5,8 @@ export type HealthResponse = components["schemas"]["HealthResponse"];
 export type StatusResponse = components["schemas"]["StatusResponse"];
 export type ModelConfig = components["schemas"]["ModelConfig"];
 export type ModelConfigSet = components["schemas"]["ModelConfigSet"];
+export type ConfigHistoryEntry = components["schemas"]["ConfigHistoryEntry"];
+export type ConfigHistoryPage = components["schemas"]["ConfigHistoryPage"];
 export type Daemon = components["schemas"]["Daemon"];
 export type DaemonList = components["schemas"]["DaemonList"];
 export type DaemonCredential = components["schemas"]["DaemonCredential"];
@@ -119,6 +121,29 @@ export function putConfig(config: ModelConfigSet, signal?: AbortSignal): Promise
     method: "PUT",
     body: JSON.stringify(config),
     signal,
+  });
+}
+
+/** `GET /v1/config/history` — stored configurations, newest first. */
+export function listConfigHistory(
+  query: { limit?: number; cursor?: string } = {},
+  signal?: AbortSignal,
+): Promise<ConfigHistoryPage> {
+  const params = new URLSearchParams();
+  if (query.limit !== undefined) params.set("limit", String(query.limit));
+  if (query.cursor) params.set("cursor", query.cursor);
+  const search = params.toString();
+  return requestJson<ConfigHistoryPage>(`/v1/config/history${search ? `?${search}` : ""}`, {
+    signal,
+    cache: "no-store",
+  });
+}
+
+/** `POST /v1/config/history/{id}/rollback` — make an entry current under `version`. */
+export function rollbackConfig(id: number, version: string): Promise<ModelConfigSet> {
+  return requestJson<ModelConfigSet>(`/v1/config/history/${id}/rollback`, {
+    method: "POST",
+    body: JSON.stringify({ version }),
   });
 }
 

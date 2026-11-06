@@ -22,6 +22,7 @@ The control plane does not serve it; the bundle runs locally (`vite dev` or
 | `src/components/TelemetryTable.tsx` | Latest 25 `UsageEvent`s, newest first; daemon/model filters live in `App` |
 | `src/components/ModelList.tsx` | Model table with add, edit and delete; each change pushes the whole `ModelConfigSet` |
 | `src/components/ModelForm.tsx`, `src/lib/modelForm.ts` | Add/edit form, validation, and draft ⇄ `ModelConfig` conversion |
+| `src/components/ConfigHistory.tsx` | Configuration history with a per-entry rollback, below the model list |
 | `src/components/ConfigEditor.tsx` | Raw JSON editor for `ModelConfigSet`, behind "Edit raw JSON" under the model list |
 | `src/components/Card.tsx`, `src/lib/format.ts` | Layout and formatting helpers |
 
@@ -87,6 +88,15 @@ delete sends the full `ModelConfigSet` with `PUT /v1/config`:
   while keeping it is rejected, since the control plane matches keys by
   `model_name` and the key would be dropped.
 - Delete asks for confirmation. Errors from the control plane show inline.
+
+### Configuration history (`ConfigHistory`)
+
+Loads `GET /v1/config/history` (20 per page, "Load older" for more) when the
+current version changes rather than on every poll. Each row shows its source
+and how its models differ from the current set (`+added; −removed; ~changed`).
+"Roll back" confirms first, warning when a model would have neither a stored key
+nor `api_key_env`, then calls the rollback endpoint with the next version label
+and refreshes the dashboard.
 
 ### Usage filters
 
