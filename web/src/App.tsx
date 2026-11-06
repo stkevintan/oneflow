@@ -1,14 +1,27 @@
-import { RECENT_USAGE_LIMIT, useDashboard } from "./api/useDashboard";
+import { NO_USAGE_FILTER, RECENT_USAGE_LIMIT, useDashboard } from "./api/useDashboard";
+import type { UsageFilter } from "./api/useDashboard";
 import { Card } from "./components/Card";
-import { ConfigEditor } from "./components/ConfigEditor";
 import { DaemonTable } from "./components/DaemonTable";
 import { DaemonCredentials } from "./components/DaemonCredentials";
 import { DaemonDetails } from "./components/DaemonDetails";
+import { ModelList } from "./components/ModelList";
 import { TelemetryTable } from "./components/TelemetryTable";
 import { Topbar } from "./components/Topbar";
 
 export default function App() {
-  const { snapshot, error, connection, refresh } = useDashboard();
+  const [usageFilter, setUsageFilter] = useState<UsageFilter>(NO_USAGE_FILTER);
+  const { snapshot, error, connection, refresh } = useDashboard(3000, usageFilter);
+  const filtered = usageFilter.daemon_id !== "" || usageFilter.model_name !== "";
+  // Offer every daemon and model the dashboard knows, plus the current choice.
+  const daemonOptions = [...new Set([
+    ...(snapshot?.credentials ?? []).map((credential) => credential.daemon_id),
+    ...(snapshot?.daemons ?? []).flatMap((daemon) => (daemon.daemon_id ? [daemon.daemon_id] : [])),
+    ...(usageFilter.daemon_id ? [usageFilter.daemon_id] : []),
+  ])].sort();
+  const modelOptions = [...new Set([
+    ...(snapshot?.config.models ?? []).map((model) => model.model_name),
+    ...(usageFilter.model_name ? [usageFilter.model_name] : []),
+  ])].sort();
   const [token, setToken] = useState("");
   const [authRevision, setAuthRevision] = useState(0);
   const [daemonId, setDaemonId] = useState(() => new URLSearchParams(window.location.hash.slice(1)).get("daemon"));
@@ -86,12 +99,43 @@ export default function App() {
 
             <Card
               title="Recent usage"
-              hint={`Latest ${RECENT_USAGE_LIMIT} events across all daemons`}
+              hint={`Latest ${RECENT_USAGE_LIMIT} events${filtered ? " matching the filters" : " across all daemons"}`}
             >
-              <TelemetryTable events={snapshot?.usage ?? []} limit={RECENT_USAGE_LIMIT} />
+              <div className="mb-3 flex flex-wrap items-center gap-3 text-sm text-slate-300">
+                <label htmlFor="usage-daemon">Daemon</label>
+                <select
+                  id="usage-daemon"
+                  value={usageFilter.daemon_id}
+                  onChange={(event) => setUsageFilter((current) => ({ ...current, daemon_id: event.target.value }))}
+                  className="rounded border border-slate-700 bg-slate-900 px-2 py-1"
+                >
+                  <option value="">All daemons</option>
+                  {daemonOptions.map((id) => <option key={id} value={id}>{id}</option>)}
+                </select>
+                <label htmlFor="usage-model">Model</label>
+                <select
+                  id="usage-model"
+                  value={usageFilter.model_name}
+                  onChange={(event) => setUsageFilter((current) => ({ ...current, model_name: event.target.value }))}
+                  className="rounded border border-slate-700 bg-slate-900 px-2 py-1"
+                >
+                  <option value="">All models</option>
+                  {modelOptions.map((name) => <option key={name} value={name}>{name}</option>)}
+                </select>
+                {filtered ? (
+                  <button
+                    type="button"
+                    className="text-xs text-sky-300 hover:underline"
+                    onClick={() => setUsageFilter(NO_USAGE_FILTER)}
+                  >
+                    Clear filters
+                  </button>
+                ) : null}
+              </div>
+              <TelemetryTable events={snapshot?.usage ?? []} limit={RECENT_USAGE_LIMIT} filtered={filtered} />
             </Card>
 
-            <ConfigEditor config={snapshot?.config ?? null} onPushed={refresh} />
+            <ModelList config={snapshot?.config ?? null} onPushed={refresh} />
           </>
         )}
       </main>

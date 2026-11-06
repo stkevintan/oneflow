@@ -14,13 +14,15 @@ The control plane does not serve it; the bundle runs locally (`vite dev` or
 | --- | --- |
 | `src/api/schema.d.ts` | Generated from `contract/openapi.yaml` (`npm run generate:api`). Never edited. |
 | `src/api/client.ts` | Contract type aliases and one typed function per operation: `getHealth`, `getStatus`, `getConfig`, `putConfig`, `listDaemons`, `getDaemon`, `listUsageEvents`. `ApiError` carries the HTTP status and the `ErrorResponse.error` message. |
-| `src/api/useDashboard.ts` | Polling hook returning `{ snapshot, error, connection, refresh }` |
+| `src/api/useDashboard.ts` | Polling hook returning `{ snapshot, error, connection, refresh }`; takes an optional `UsageFilter` (`daemon_id`, `model_name`) passed to `GET /v1/usage/events` |
 | `src/env.d.ts` | Types for `import.meta.env.VITE_CONTROL_PLANE_URL` |
 | `src/App.tsx` | Page layout |
 | `src/components/Topbar.tsx` | Server version, daemon count, config version, uptime, connection state, refresh |
 | `src/components/DaemonTable.tsx` | One row per `Daemon` |
-| `src/components/TelemetryTable.tsx` | Latest 25 `UsageEvent`s, newest first |
-| `src/components/ConfigEditor.tsx` | JSON editor for `ModelConfigSet` |
+| `src/components/TelemetryTable.tsx` | Latest 25 `UsageEvent`s, newest first; daemon/model filters live in `App` |
+| `src/components/ModelList.tsx` | Model table with add, edit and delete; each change pushes the whole `ModelConfigSet` |
+| `src/components/ModelForm.tsx`, `src/lib/modelForm.ts` | Add/edit form, validation, and draft ⇄ `ModelConfig` conversion |
+| `src/components/ConfigEditor.tsx` | Raw JSON editor for `ModelConfigSet`, behind "Edit raw JSON" under the model list |
 | `src/components/Card.tsx`, `src/lib/format.ts` | Layout and formatting helpers |
 
 ## Base URL
@@ -46,9 +48,12 @@ flowchart LR
     app --> top[Topbar]
     app --> dt[DaemonTable]
     app --> tt[TelemetryTable]
-    app --> ce[ConfigEditor]
+    app --> ml[ModelList]
+    ml --> mf[ModelForm]
+    ml --> ce[ConfigEditor]
+    ml -- PUT /v1/config --> cp
     ce -- PUT /v1/config --> cp
-    ce -- refresh() --> hook
+    ml -- refresh() --> hook
 ```
 
 ### Polling (`useDashboard`)
@@ -63,7 +68,33 @@ flowchart LR
   `offline` after a failure. The last good snapshot stays on screen while
   offline.
 
-### Config editing (`ConfigEditor`)
+### Model list and form (`ModelList`, `ModelForm`)
+
+The control plane only offers whole-configuration writes, so every add, edit or
+delete sends the full `ModelConfigSet` with `PUT /v1/config`:
+
+- The version label defaults to `nextVersion(current)` (bumps a trailing
+  number, else appends `-2`) and can be edited in "Next version".
+- Models not being edited are sent back as they came, minus the response-only
+  `api_key_configured`, so their stored keys are kept by omission.
+- `upstream_model`, `api_key_env` and the literal key have their own fields; other
+  `parameters` are free key/value rows.
+- The stored key is a radio choice: keep (omit `api_key`), replace (send the new
+  value; empty is rejected) or remove (send `""`). It is never shown.
+- Validation runs on save: required name, provider and `api_base`; `api_base`
+  must be an absolute http(s) URL; names must be unique; parameter rows must
+  not repeat or shadow the dedicated fields. Renaming a model with a stored key
+  while keeping it is rejected, since the control plane matches keys by
+  `model_name` and the key would be dropped.
+- Delete asks for confirmation. Errors from the control plane show inline.
+
+### Usage filters
+
+The "Recent usage" card has daemon and model selects, offering the provisioned
+daemons and configured models. They are sent as `daemon_id`/`model_name` to
+`GET /v1/usage/events`, so the 25-event limit applies after filtering.
+
+### Raw JSON editing (`ConfigEditor`)
 
 1. Shows the current `snapshot.config` as formatted JSON.
 2. Once the user edits, the draft is marked dirty and polling no longer

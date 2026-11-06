@@ -8,6 +8,8 @@ interface ConfigEditorProps {
   /** Latest configuration reported by the control plane. */
   config: ModelConfigSet | null;
   onPushed: () => void;
+  /** Render without its own card, inside another one. */
+  embedded?: boolean;
 }
 
 type MessageState = "idle" | "ok" | "error";
@@ -20,7 +22,7 @@ function isModelConfigSet(value: unknown): value is ModelConfigSet {
   return typeof candidate.version === "string" && Array.isArray(candidate.models);
 }
 
-export function ConfigEditor({ config, onPushed }: ConfigEditorProps) {
+export function ConfigEditor({ config, onPushed, embedded = false }: ConfigEditorProps) {
   const [draft, setDraft] = useState("");
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -71,16 +73,8 @@ export function ConfigEditor({ config, onPushed }: ConfigEditorProps) {
     }
   };
 
-  return (
-    <Card
-      title="Model configuration"
-      badge={
-        <span className="rounded-full border border-slate-700 bg-slate-800 px-2 py-0.5 text-xs font-medium normal-case tracking-normal text-slate-400">
-          {config?.version ?? "—"}
-        </span>
-      }
-      hint="Pushing replaces the configuration on every connected daemon"
-    >
+  const body = (
+    <>
       <textarea
         aria-label="Model configuration JSON"
         spellCheck={false}
@@ -137,6 +131,23 @@ export function ConfigEditor({ config, onPushed }: ConfigEditorProps) {
           {message}
         </span>
       </div>
+    </>
+  );
+
+  if (embedded) {
+    return <div className="mt-3">{body}</div>;
+  }
+  return (
+    <Card
+      title="Model configuration"
+      badge={
+        <span className="rounded-full border border-slate-700 bg-slate-800 px-2 py-0.5 text-xs font-medium normal-case tracking-normal text-slate-400">
+          {config?.version ?? "—"}
+        </span>
+      }
+      hint="Pushing replaces the configuration on every connected daemon"
+    >
+      {body}
     </Card>
   );
 }

@@ -88,7 +88,7 @@ build. Regenerate all bindings with [`scripts/generate-types.sh`](../scripts/gen
 | `src/api/client.ts`      | Typed `/v1` client and generated type aliases         |
 | `src/api/useDashboard.ts`| Polling hook for status, daemons, usage, and config  |
 | `src/env.d.ts`           | Type for `VITE_CONTROL_PLANE_URL`                    |
-| `src/components/`        | `Topbar`, `Card`, `DaemonTable`, `TelemetryTable`, `ConfigEditor` |
+| `src/components/`        | `Topbar`, `Card`, `DaemonTable`, `TelemetryTable`, `ModelList`, `ModelForm`, `ConfigEditor` |
 | `src/App.test.tsx`       | Renders the dashboard against a stubbed API          |
 | `dist/`                  | Build output (git-ignored), deployed separately      |
 
