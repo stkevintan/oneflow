@@ -126,6 +126,91 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
+  /v1/config/history:
+    get:
+      operationId: listConfigHistory
+      summary: List stored configurations, newest first
+      description: |
+        Every configuration stored by `PUT /v1/config` or a rollback, plus the
+        one current when history started. The newest entry is the current
+        configuration. Only the latest 100 are kept.
+
+        History never holds literal `api_key` values. In each entry,
+        `api_key_configured` tells whether a key is stored now for that
+        `model_name`, which is the key a rollback would use.
+      tags: [config]
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of entries to return.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque cursor from a previous page's `next_cursor`.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: A page of history entries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigHistoryPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/config/history/{id}/rollback:
+    post:
+      operationId: rollbackConfig
+      summary: Make a stored configuration current again
+      description: |
+        Replaces the configuration with history entry `id` under a new
+        `version` and pushes it to every connected daemon, like
+        `PUT /v1/config`. The rollback is itself recorded in history.
+
+        Literal `api_key` values are not kept in history: each model uses the
+        key stored now for its `model_name`, if any. A model whose key has
+        since been removed comes back without one.
+      tags: [config]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RollbackConfigRequest"
+      responses:
+        "200":
+          description: The stored configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelConfigSet"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
   /v1/daemons:
     post:
       operationId: createDaemon
@@ -729,6 +814,51 @@ components:
           minItems: 1
           items:
             $ref: "#/components/schemas/ModelConfig"
+
+    ConfigHistoryPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          description: Newest first.
+          items:
+            $ref: "#/components/schemas/ConfigHistoryEntry"
+        next_cursor:
+          type: [string, "null"]
+          description: Cursor for the next (older) page, or null when there are no more entries.
+
+    ConfigHistoryEntry:
+      type: object
+      required: [id, version, created_at, source, rolled_back_from, config]
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Identifier to pass to the rollback endpoint.
+        version:
+          type: string
+        created_at:
+          type: integer
+          format: int64
+          description: Unix seconds when it was stored.
+        source:
+          type: string
+          description: "`initial` (current when history started), `put` or `rollback`."
+        rolled_back_from:
+          type: [integer, "null"]
+          format: int64
+          description: For a rollback, the history entry it restored.
+        config:
+          $ref: "#/components/schemas/ModelConfigSet"
+
+    RollbackConfigRequest:
+      type: object
+      required: [version]
+      properties:
+        version:
+          type: string
+          description: Non-empty version label for the restored configuration.
 
     ModelConfig:
       type: object

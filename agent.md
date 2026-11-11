@@ -74,7 +74,8 @@ contract/openapi.yaml                 source of truth, edited first
   - Tracks every connection: registration, heartbeats, telemetry totals, last-seen
   - Broadcasts configuration updates to all connected daemons via a `tokio::sync::broadcast` channel
   - Pure API service (ADR 0001 step 1): `/v1/health`, `/v1/status`, `GET/PUT /v1/config`,
-    `/v1/daemons[/{connection_id}]`, paginated `/v1/usage/events`, using the generated DTOs.
+    `/v1/config/history` + rollback, `/v1/daemons[/{connection_id}]`, paginated
+    `/v1/usage/events`, using the generated DTOs.
     Serves no HTML; every error is a JSON `ErrorResponse`. Optional CORS allow-list.
   - Bearer auth is declared in the contract but **not enforced** yet
   - Modules: `api.rs` (routes), `control.rs` (WebSocket), `store.rs` (`MemoryStore`, the
@@ -123,9 +124,9 @@ contract/openapi.yaml                 source of truth, edited first
 - Earlier end-to-end checks still hold: config pushed through `PUT /v1/config` is broadcast, a live
   daemon immediately serves the new model list, `upstream_model` rewrites the model id sent
   upstream, and `api_key_env` injects the upstream bearer token
-- `cargo test --workspace` passes: 34 control-plane, 33 daemon, 3 protocol, and 6
+- `cargo test --workspace` passes: 36 control-plane, 33 daemon, 3 protocol, and 6
   config-provider tests; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets`,
-  `scripts/generate-types.sh --check`, `npm test` (27), `npm run typecheck` and `npm run build`
+  `scripts/generate-types.sh --check`, `npm test` (31), `npm run typecheck` and `npm run build`
   pass. The PostgreSQL-backed control-plane tests are skipped unless
   `ONEFLOW_TEST_DATABASE_URL` is set; they pass against a throwaway `postgres:16` container.
   Smoke-tested end to end: control plane + daemon + `vite preview`, config PUT reached the
@@ -187,7 +188,8 @@ address. The inference routes use fixed paths such as `/v1/chat/completions`.
 **Phase 2 — make the control-plane management API usable**
 1. **Contract-first resources**: ✅ v1 API done (`/v1/config`, `/v1/daemons`, paginated
    `/v1/usage/events`) and the declared bearer auth is enforced (ADR 0001 step 2). Still open:
-   per-model CRUD (`/v1/models/{model_name}`), daemon commands, and config history/rollback.
+   per-model CRUD (`/v1/models/{model_name}`) and daemon commands. Config history and rollback
+   are done (`/v1/config/history`, key-free, latest 100, dashboard card).
 2. **Secrets**: ✅ `parameters.api_key` is write-only through the management API: never
    returned (responses carry `api_key_configured`), kept when a `PUT` omits it, removed by
    `""`. Still open: it is stored unencrypted in PostgreSQL and crosses the control channel,

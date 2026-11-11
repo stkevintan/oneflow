@@ -71,6 +71,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/config/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List stored configurations, newest first
+         * @description Every configuration stored by `PUT /v1/config` or a rollback, plus the
+         *     one current when history started. The newest entry is the current
+         *     configuration. Only the latest 100 are kept.
+         *
+         *     History never holds literal `api_key` values. In each entry,
+         *     `api_key_configured` tells whether a key is stored now for that
+         *     `model_name`, which is the key a rollback would use.
+         */
+        get: operations["listConfigHistory"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/config/history/{id}/rollback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Make a stored configuration current again
+         * @description Replaces the configuration with history entry `id` under a new
+         *     `version` and pushes it to every connected daemon, like
+         *     `PUT /v1/config`. The rollback is itself recorded in history.
+         *
+         *     Literal `api_key` values are not kept in history: each model uses the
+         *     key stored now for its `model_name`, if any. A model whose key has
+         *     since been removed comes back without one.
+         */
+        post: operations["rollbackConfig"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/daemons": {
         parameters: {
             query?: never;
@@ -400,6 +452,37 @@ export interface components {
             version: string;
             models: components["schemas"]["ModelConfig"][];
         };
+        ConfigHistoryPage: {
+            /** @description Newest first. */
+            items: components["schemas"]["ConfigHistoryEntry"][];
+            /** @description Cursor for the next (older) page, or null when there are no more entries. */
+            next_cursor: string | null;
+        };
+        ConfigHistoryEntry: {
+            /**
+             * Format: int64
+             * @description Identifier to pass to the rollback endpoint.
+             */
+            id: number;
+            version: string;
+            /**
+             * Format: int64
+             * @description Unix seconds when it was stored.
+             */
+            created_at: number;
+            /** @description `initial` (current when history started), `put` or `rollback`. */
+            source: string;
+            /**
+             * Format: int64
+             * @description For a rollback, the history entry it restored.
+             */
+            rolled_back_from: number | null;
+            config: components["schemas"]["ModelConfigSet"];
+        };
+        RollbackConfigRequest: {
+            /** @description Non-empty version label for the restored configuration. */
+            version: string;
+        };
         ModelConfig: {
             /** @description Model identifier clients send to the daemon. Must be non-empty. */
             model_name: string;
@@ -670,6 +753,64 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+        };
+    };
+    listConfigHistory: {
+        parameters: {
+            query?: {
+                /** @description Maximum number of entries to return. */
+                limit?: number;
+                /** @description Opaque cursor from a previous page's `next_cursor`. */
+                cursor?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of history entries */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConfigHistoryPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    rollbackConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RollbackConfigRequest"];
+            };
+        };
+        responses: {
+            /** @description The stored configuration */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelConfigSet"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["Unavailable"];
         };
     };
     listDaemons: {

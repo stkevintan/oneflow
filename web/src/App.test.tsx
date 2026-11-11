@@ -106,6 +106,7 @@ function stubApi() {
       return jsonResponse(JSON.parse(String(init.body)));
     }
     if (path === "/v1/config") return jsonResponse(CONFIG);
+    if (path === "/v1/config/history") return jsonResponse({ items: [], next_cursor: null });
     if (path === "/key/list") return jsonResponse({
       keys: [], total_count: 0, current_page: 1, total_pages: 0,
     });

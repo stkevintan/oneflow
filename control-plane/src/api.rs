@@ -12,8 +12,8 @@ use axum::{
     Json, Router,
 };
 use protocol::{
-    ControlMessage, Daemon, DaemonList, ErrorResponse, HealthResponse, ModelConfigSet,
-    StatusResponse, UsageEventPage,
+    ConfigHistoryEntry, ConfigHistoryPage, ControlMessage, Daemon, DaemonList, ErrorResponse,
+    HealthResponse, ModelConfigSet, RollbackConfigRequest, StatusResponse, UsageEventPage,
 };
 use serde::Deserialize;
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -26,12 +26,15 @@ use crate::{
 };
 
 const DEFAULT_USAGE_PAGE_SIZE: usize = 50;
+const DEFAULT_HISTORY_PAGE_SIZE: i64 = 20;
 
 pub fn create_app(state: AppState, cors_allowed_origins: Vec<HeaderValue>) -> Router {
     let router = Router::new()
         .route("/v1/health", get(health))
         .route("/v1/status", get(status))
         .route("/v1/config", get(get_config).put(put_config))
+        .route("/v1/config/history", get(list_config_history))
+        .route("/v1/config/history/:id/rollback", post(rollback_config))
         .route(
             "/v1/daemons",
             get(list_daemons).post(crate::daemon_credentials::create),
@@ -230,6 +233,12 @@ async fn put_config(
             );
         }
     };
+    publish_config(&state, config).await
+}
+
+/// Make a stored configuration current here and on every connected daemon,
+/// and answer with it redacted.
+async fn publish_config(state: &AppState, config: ModelConfigSet) -> Response {
     state.store.set_config(config.clone()).await;
 
     let receivers = state
@@ -244,6 +253,113 @@ async fn put_config(
     );
 
     Json(crate::config_secrets::redact(config)).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct HistoryParams {
+    limit: Option<i64>,
+    cursor: Option<String>,
+}
+
+async fn list_config_history(
+    State(state): State<AppState>,
+    params: Result<Query<HistoryParams>, QueryRejection>,
+) -> Response {
+    let Query(params) = match params {
+        Ok(params) => params,
+        Err(rejection) => return error(StatusCode::BAD_REQUEST, rejection.body_text()),
+    };
+    let limit = params.limit.unwrap_or(DEFAULT_HISTORY_PAGE_SIZE);
+    let max = crate::virtual_keys::CONFIG_HISTORY_LIMIT;
+    if !(1..=max).contains(&limit) {
+        return error(
+            StatusCode::BAD_REQUEST,
+            format!("limit must be between 1 and {max}"),
+        );
+    }
+    let before = match params.cursor.as_deref().map(str::parse::<i64>) {
+        None => None,
+        Some(Ok(id)) if id > 0 => Some(id),
+        Some(_) => return error(StatusCode::BAD_REQUEST, "cursor is invalid"),
+    };
+
+    let store = &state.access.store;
+    // One extra row tells whether an older page exists.
+    let (entries, current) =
+        match tokio::try_join!(store.config_history(limit + 1, before), store.config()) {
+            Ok(result) => result,
+            Err(err) => {
+                tracing::error!(error = %err, "failed to read model configuration history");
+                return error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "durable configuration is unavailable",
+                );
+            }
+        };
+    let more = entries.len() as i64 > limit;
+    let entries = &entries[..entries.len().min(limit as usize)];
+    let next_cursor = more
+        .then(|| entries.last().map(|entry| entry.id.to_string()))
+        .flatten();
+    // History holds no keys; report the key a rollback would use, which is
+    // the one stored now for the same model name.
+    let current = crate::config_secrets::redact(current);
+    let items = entries
+        .iter()
+        .map(|entry| {
+            let mut config = entry.config.clone();
+            for model in &mut config.models {
+                model.api_key_configured = Some(current.models.iter().any(|stored| {
+                    stored.model_name == model.model_name && stored.api_key_configured == Some(true)
+                }));
+            }
+            ConfigHistoryEntry {
+                id: entry.id,
+                version: entry.version.clone(),
+                created_at: entry.created_at,
+                source: entry.source.clone(),
+                rolled_back_from: entry.rolled_back_from,
+                config,
+            }
+        })
+        .collect();
+    Json(ConfigHistoryPage { items, next_cursor }).into_response()
+}
+
+async fn rollback_config(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    payload: Result<Json<RollbackConfigRequest>, JsonRejection>,
+) -> Response {
+    let Ok(id) = id.parse::<i64>() else {
+        return error(StatusCode::NOT_FOUND, "history entry not found");
+    };
+    let request = match payload {
+        Ok(Json(request)) => request,
+        Err(rejection) => return error(StatusCode::BAD_REQUEST, rejection.body_text()),
+    };
+    if request.version.trim().is_empty() {
+        return error(StatusCode::BAD_REQUEST, "version must not be empty");
+    }
+    match state
+        .access
+        .store
+        .rollback_config(id, request.version)
+        .await
+    {
+        Ok(Some(config)) => {
+            info!(from = id, version = %config.version, "rolled back model configuration");
+            publish_config(&state, config).await
+        }
+        Ok(None) => error(StatusCode::NOT_FOUND, "history entry not found"),
+        Err(err) => {
+            tracing::error!(error = %err, "failed to roll back model configuration");
+            error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "durable configuration is unavailable",
+            )
+        }
+    }
 }
 
 fn validate_config(config: &ModelConfigSet) -> Result<(), String> {
@@ -481,6 +597,7 @@ mod contract_tests {
     fn concrete_path(path: &str) -> String {
         path.replace("{connection_id}", CONNECTION_ID)
             .replace("{daemon_id}", "missing-test-daemon")
+            .replace("{id}", "0")
     }
 
     fn schema_ref_name(schema: &Value) -> Option<&str> {
@@ -710,6 +827,162 @@ mod contract_tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(removed["models"][0]["api_key_configured"], false);
         assert_eq!(broadcast_key(daemons.recv().await.unwrap(), "keyed"), None);
+    }
+
+    /// Every write lands in history without its key; a rollback restores the
+    /// models under a new version, reuses the key stored now, reaches daemons
+    /// and is itself recorded.
+    #[tokio::test]
+    async fn config_history_records_writes_and_rolls_back() {
+        if std::env::var_os("ONEFLOW_TEST_DATABASE_URL").is_none() {
+            eprintln!("Skipping config history test: set ONEFLOW_TEST_DATABASE_URL");
+            return;
+        }
+        let _config_lock = crate::SHARED_CONFIG_TEST_LOCK.lock().await;
+        const SECRET: &str = "sk-history-secret";
+        let (app, mut daemons) = seeded_app_with_broadcast(Vec::new()).await;
+        let put = |version: &str, models: Value| {
+            let app = app.clone();
+            let body = json!({ "version": version, "models": models }).to_string();
+            async move { call(app, "put", "/v1/config", Some(&body)).await }
+        };
+        let model = |name: &str, parameters: Value| {
+            json!({
+                "model_name": name,
+                "provider": "custom_openai",
+                "api_base": "https://example.test/v1",
+                "parameters": parameters,
+            })
+        };
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let v1 = format!("history-a-{tag}");
+        let v2 = format!("history-b-{tag}");
+
+        let (status, _) = put(
+            &v1,
+            json!([
+                model("keyed", json!({ "api_key": SECRET })),
+                model("old", json!({}))
+            ]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = put(
+            &v2,
+            json!([model("keyed", json!({ "upstream_model": "u2" }))]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        while daemons.try_recv().is_ok() {}
+
+        let (status, page) = call(app.clone(), "get", "/v1/config/history?limit=2", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !page.to_string().contains(SECRET),
+            "history returned the key"
+        );
+        let items = page["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["version"], v2.as_str());
+        assert_eq!(items[0]["source"], "put");
+        assert_eq!(items[1]["version"], v1.as_str());
+        assert_eq!(items[1]["config"]["models"][0]["api_key_configured"], true);
+        assert_eq!(items[1]["config"]["models"][1]["api_key_configured"], false);
+        let v1_id = items[1]["id"].as_i64().unwrap();
+        let cursor = page["next_cursor"].as_str().expect("older entries remain");
+        let (_, older) = call(
+            app.clone(),
+            "get",
+            &format!("/v1/config/history?limit=1&cursor={cursor}"),
+            None,
+        )
+        .await;
+        assert!(older["items"][0]["id"].as_i64().unwrap() < v1_id);
+
+        // Nothing stored holds the key, not even the history table itself.
+        let store = crate::virtual_keys::VirtualKeyStore::connect(
+            &std::env::var("ONEFLOW_TEST_DATABASE_URL").unwrap(),
+            &default_config(),
+        )
+        .await
+        .unwrap();
+        let leaked: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM model_config_history WHERE config::text LIKE $1)",
+        )
+        .bind(format!("%{SECRET}%"))
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert!(!leaked, "history stored the key");
+
+        let v3 = format!("history-c-{tag}");
+        let (status, restored) = call(
+            app.clone(),
+            "post",
+            &format!("/v1/config/history/{v1_id}/rollback"),
+            Some(&json!({ "version": v3 }).to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(restored["version"], v3.as_str());
+        assert_eq!(restored["models"].as_array().unwrap().len(), 2);
+        assert_eq!(restored["models"][0]["api_key_configured"], true);
+        assert!(!restored.to_string().contains(SECRET));
+        match daemons.recv().await.unwrap() {
+            ControlMessage::ConfigUpdate {
+                models, version, ..
+            } => {
+                assert_eq!(version, v3);
+                assert_eq!(
+                    models[0].parameters.get("api_key").map(String::as_str),
+                    Some(SECRET)
+                );
+                assert_eq!(models[1].model_name, "old");
+            }
+            other => panic!("expected ConfigUpdate, got {other:?}"),
+        }
+        let (_, current) = call(app.clone(), "get", "/v1/config", None).await;
+        assert_eq!(current["version"], v3.as_str());
+        let (_, page) = call(app.clone(), "get", "/v1/config/history?limit=1", None).await;
+        assert_eq!(page["items"][0]["source"], "rollback");
+        assert_eq!(page["items"][0]["rolled_back_from"], v1_id);
+
+        for (path, body, expected) in [
+            (
+                "/v1/config/history/0/rollback",
+                json!({ "version": "x" }),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "/v1/config/history/abc/rollback",
+                json!({ "version": "x" }),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                &*format!("/v1/config/history/{v1_id}/rollback"),
+                json!({ "version": " " }),
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let (status, response) = call(app.clone(), "post", path, Some(&body.to_string())).await;
+            assert_eq!(status, expected, "{path} {body}");
+            assert!(response["error"].is_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_history_queries_are_json_400() {
+        for query in ["limit=0", "limit=101", "cursor=0", "cursor=abc"] {
+            let (status, body) = call(
+                app().await,
+                "get",
+                &format!("/v1/config/history?{query}"),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "query: {query}");
+            assert!(body["error"].is_string(), "query: {query}");
+        }
     }
 
     #[tokio::test]

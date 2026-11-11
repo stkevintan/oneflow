@@ -57,56 +57,6 @@ are then zero because they are unknown, not because they are zero.
     pub virtual_key_id: String,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ModelConfigSet {
-    ///Constraint: minItems=1
-    pub models: Vec<ModelConfig>,
-    ///Non-empty version label shown to operators and applied by daemons.
-    pub version: String,
-}
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ModelConfig {
-    ///Upstream base URL, for example `https://api.deepseek.com/v1`. Must be non-empty.
-    pub api_base: String,
-    /**Whether a literal upstream `api_key` is stored for this model.
-The management API returns this in place of the key itself; it is
-ignored on input.
-*/
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_key_configured: Option<bool>,
-    ///Model identifier clients send to the daemon. Must be non-empty.
-    pub model_name: String,
-    /**Free-form provider options. `upstream_model` rewrites the model id
-sent upstream; `api_key_env` names an environment variable holding
-the upstream credential on the daemon host (preferred).
-
-`api_key` is a literal upstream credential and is write-only: the
-management API never returns it. On `PUT /v1/config`, omitting
-`api_key` keeps the key already stored for the same `model_name`,
-and an empty string removes it. Daemons still receive it over the
-authenticated control channel.
-*/
-    pub parameters: ModelConfigParameters,
-    ///Provider adapter, for example `custom_openai`.
-    pub provider: String,
-}
-/**Free-form provider options. `upstream_model` rewrites the model id
-sent upstream; `api_key_env` names an environment variable holding
-the upstream credential on the daemon host (preferred).
-
-`api_key` is a literal upstream credential and is write-only: the
-management API never returns it. On `PUT /v1/config`, omitting
-`api_key` keeps the key already stored for the same `model_name`,
-and an empty string removes it. Daemons still receive it over the
-authenticated control channel.
-*/
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct ModelConfigParameters {
-    /// Additional properties matching the spec's
-    /// `additionalProperties` value schema.
-    #[serde(flatten)]
-    pub additional_properties: std::collections::BTreeMap<String, String>,
-}
-#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct KeyListResponse {
     pub current_page: i64,
     pub keys: Vec<KeyListResponseKeysItemUnion>,
@@ -226,6 +176,76 @@ pub struct DaemonCredential {
     pub daemon_id: String,
     pub revoked_at: Option<i64>,
     pub rotated_at: Option<i64>,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ConfigHistoryPage {
+    ///Newest first.
+    pub items: Vec<ConfigHistoryEntry>,
+    ///Cursor for the next (older) page, or null when there are no more entries.
+    pub next_cursor: Option<String>,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ConfigHistoryEntry {
+    pub config: ModelConfigSet,
+    ///Unix seconds when it was stored.
+    pub created_at: i64,
+    ///Identifier to pass to the rollback endpoint.
+    pub id: i64,
+    ///For a rollback, the history entry it restored.
+    pub rolled_back_from: Option<i64>,
+    ///`initial` (current when history started), `put` or `rollback`.
+    pub source: String,
+    pub version: String,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ModelConfigSet {
+    ///Constraint: minItems=1
+    pub models: Vec<ModelConfig>,
+    ///Non-empty version label shown to operators and applied by daemons.
+    pub version: String,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ModelConfig {
+    ///Upstream base URL, for example `https://api.deepseek.com/v1`. Must be non-empty.
+    pub api_base: String,
+    /**Whether a literal upstream `api_key` is stored for this model.
+The management API returns this in place of the key itself; it is
+ignored on input.
+*/
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_configured: Option<bool>,
+    ///Model identifier clients send to the daemon. Must be non-empty.
+    pub model_name: String,
+    /**Free-form provider options. `upstream_model` rewrites the model id
+sent upstream; `api_key_env` names an environment variable holding
+the upstream credential on the daemon host (preferred).
+
+`api_key` is a literal upstream credential and is write-only: the
+management API never returns it. On `PUT /v1/config`, omitting
+`api_key` keeps the key already stored for the same `model_name`,
+and an empty string removes it. Daemons still receive it over the
+authenticated control channel.
+*/
+    pub parameters: ModelConfigParameters,
+    ///Provider adapter, for example `custom_openai`.
+    pub provider: String,
+}
+/**Free-form provider options. `upstream_model` rewrites the model id
+sent upstream; `api_key_env` names an environment variable holding
+the upstream credential on the daemon host (preferred).
+
+`api_key` is a literal upstream credential and is write-only: the
+management API never returns it. On `PUT /v1/config`, omitting
+`api_key` keeps the key already stored for the same `model_name`,
+and an empty string removes it. Daemons still receive it over the
+authenticated control channel.
+*/
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ModelConfigParameters {
+    /// Additional properties matching the spec's
+    /// `additionalProperties` value schema.
+    #[serde(flatten)]
+    pub additional_properties: std::collections::BTreeMap<String, String>,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CreateDaemonRequest {
@@ -384,6 +404,11 @@ pub struct HealthResponse {
     ///Always `ok` when the service responds.
     pub status: String,
     ///Control-plane build version.
+    pub version: String,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RollbackConfigRequest {
+    ///Non-empty version label for the restored configuration.
     pub version: String,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
