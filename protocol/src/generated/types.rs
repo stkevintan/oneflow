@@ -206,7 +206,10 @@ pub struct ModelConfigSet {
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModelConfig {
-    ///Upstream base URL, for example `https://api.deepseek.com/v1`. Must be non-empty.
+    /**Upstream base URL, for example `https://api.deepseek.com/v1`. The daemon
+appends `/chat/completions`, so it must be an absolute `http` or `https` URL
+without surrounding whitespace or a `#fragment`; anything else is a 400.
+*/
     pub api_base: String,
     /**Whether a literal upstream `api_key` is stored for this model.
 The management API returns this in place of the key itself; it is

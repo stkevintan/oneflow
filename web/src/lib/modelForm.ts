@@ -99,6 +99,8 @@ export function validateDraft(draft: ModelDraft, otherNames: string[]): Record<s
       const url = new URL(base);
       if (url.protocol !== "http:" && url.protocol !== "https:") {
         errors.api_base = "API base URL must use http or https.";
+      } else if (url.hash) {
+        errors.api_base = "API base URL must not contain a #fragment.";
       }
     } catch {
       errors.api_base = "API base URL must be an absolute URL, for example https://api.example.com/v1.";
