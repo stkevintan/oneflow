@@ -211,6 +211,95 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /v1/models/{model_name}:
+    parameters:
+      - name: model_name
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getModel
+      summary: Read one model of the desired configuration
+      tags: [config]
+      responses:
+        "200":
+          description: The model, with `api_key_configured` in place of any key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelConfig"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    put:
+      operationId: putModel
+      summary: Add or replace one model
+      description: |
+        Replaces the model named `model_name`, or appends it, and leaves the
+        other models as they are. The result is stored under `version`,
+        recorded in history and pushed to every daemon, like `PUT /v1/config`.
+        The body's `model_name` must equal the path's.
+
+        As with `PUT /v1/config`, omitting `parameters.api_key` keeps the key
+        stored for this name and an empty `api_key` removes it.
+      tags: [config]
+      parameters:
+        - $ref: "#/components/parameters/ConfigVersion"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelConfig"
+      responses:
+        "200":
+          description: The model was replaced; the stored configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelConfigSet"
+        "201":
+          description: The model was added; the stored configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelConfigSet"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    delete:
+      operationId: deleteModel
+      summary: Remove one model
+      description: |
+        Removes the model and its stored key, stores the rest under `version`
+        and pushes it like `PUT /v1/config`. The last model cannot be removed
+        (a configuration needs at least one): that is a 400.
+      tags: [config]
+      parameters:
+        - $ref: "#/components/parameters/ConfigVersion"
+      responses:
+        "200":
+          description: The stored configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelConfigSet"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
   /v1/daemons:
     post:
       operationId: createDaemon
@@ -566,6 +655,14 @@ paths:
           $ref: "#/components/responses/Unavailable"
 
 components:
+  parameters:
+    ConfigVersion:
+      name: version
+      in: query
+      required: true
+      description: Non-empty version label for the configuration this change stores.
+      schema:
+        type: string
   securitySchemes:
     bearerAuth:
       type: http

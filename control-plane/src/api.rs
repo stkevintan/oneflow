@@ -13,7 +13,8 @@ use axum::{
 };
 use protocol::{
     ConfigHistoryEntry, ConfigHistoryPage, ControlMessage, Daemon, DaemonList, ErrorResponse,
-    HealthResponse, ModelConfigSet, RollbackConfigRequest, StatusResponse, UsageEventPage,
+    HealthResponse, ModelConfig, ModelConfigSet, RollbackConfigRequest, StatusResponse,
+    UsageEventPage,
 };
 use serde::Deserialize;
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -22,7 +23,7 @@ use tracing::info;
 use crate::{
     constant_time_token_eq, control, now_ts,
     store::{UsageQuery, USAGE_HISTORY_LIMIT},
-    virtual_keys::RollbackOutcome,
+    virtual_keys::{ChangeOutcome, ModelChange, RollbackOutcome},
     AppState,
 };
 
@@ -35,6 +36,10 @@ pub fn create_app(state: AppState, cors_allowed_origins: Vec<HeaderValue>) -> Ro
         .route("/v1/status", get(status))
         .route("/v1/config", get(get_config).put(put_config))
         .route("/v1/config/history", get(list_config_history))
+        .route(
+            "/v1/models/:model_name",
+            get(get_model).put(put_model).delete(delete_model),
+        )
         .route("/v1/config/history/:id/rollback", post(rollback_config))
         .route(
             "/v1/daemons",
@@ -254,6 +259,117 @@ async fn publish_config(state: &AppState, config: ModelConfigSet) -> Response {
     );
 
     Json(crate::config_secrets::redact(config)).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct VersionParams {
+    version: Option<String>,
+}
+
+fn required_version(
+    params: Result<Query<VersionParams>, QueryRejection>,
+) -> Result<String, String> {
+    let version = match params {
+        Ok(Query(params)) => params.version.unwrap_or_default(),
+        Err(rejection) => return Err(rejection.body_text()),
+    };
+    if version.trim().is_empty() {
+        return Err("query parameter version is required and must not be empty".to_string());
+    }
+    Ok(version)
+}
+
+async fn get_model(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+    let config = match state.access.store.config().await {
+        Ok(config) => config,
+        Err(err) => {
+            tracing::error!(error = %err, "failed to read durable model configuration");
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "durable configuration is unavailable",
+            );
+        }
+    };
+    let config = crate::config_secrets::redact(config);
+    match config
+        .models
+        .into_iter()
+        .find(|model| model.model_name == name)
+    {
+        Some(model) => Json(model).into_response(),
+        None => error(StatusCode::NOT_FOUND, format!("model '{name}' not found")),
+    }
+}
+
+async fn put_model(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    params: Result<Query<VersionParams>, QueryRejection>,
+    payload: Result<Json<ModelConfig>, JsonRejection>,
+) -> Response {
+    let version = match required_version(params) {
+        Ok(version) => version,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    let model = match payload {
+        Ok(Json(model)) => model,
+        Err(rejection) => return error(StatusCode::BAD_REQUEST, rejection.body_text()),
+    };
+    if model.model_name != name {
+        return error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "body model_name '{}' does not match the path's '{name}'",
+                model.model_name
+            ),
+        );
+    }
+    change_model(&state, version, ModelChange::Upsert(model)).await
+}
+
+async fn delete_model(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    params: Result<Query<VersionParams>, QueryRejection>,
+) -> Response {
+    let version = match required_version(params) {
+        Ok(version) => version,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    change_model(&state, version, ModelChange::Remove(name)).await
+}
+
+async fn change_model(state: &AppState, version: String, change: ModelChange) -> Response {
+    let name = match &change {
+        ModelChange::Upsert(model) => model.model_name.clone(),
+        ModelChange::Remove(name) => name.clone(),
+    };
+    match state
+        .access
+        .store
+        .change_model(version, change, validate_config)
+        .await
+    {
+        Ok(ChangeOutcome::Stored { config, created }) => {
+            info!(model = %name, version = %config.version, created, "changed one model");
+            let mut response = publish_config(state, config).await;
+            if created {
+                *response.status_mut() = StatusCode::CREATED;
+            }
+            response
+        }
+        Ok(ChangeOutcome::NotFound) => {
+            error(StatusCode::NOT_FOUND, format!("model '{name}' not found"))
+        }
+        Ok(ChangeOutcome::Invalid(message)) => error(StatusCode::BAD_REQUEST, message),
+        Err(err) => {
+            tracing::error!(error = %err, "failed to persist durable model configuration");
+            error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "durable configuration is unavailable",
+            )
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -628,6 +744,10 @@ mod contract_tests {
         path.replace("{connection_id}", CONNECTION_ID)
             .replace("{daemon_id}", "missing-test-daemon")
             .replace("{id}", "0")
+            .replace(
+                "{model_name}",
+                &default_config().models[0].model_name.clone(),
+            )
     }
 
     fn schema_ref_name(schema: &Value) -> Option<&str> {
@@ -727,6 +847,12 @@ mod contract_tests {
 
             let path = if path == "/key/info" {
                 format!("/key/info?key={}", created["token"].as_str().unwrap())
+            } else if path == "/v1/models/{model_name}" {
+                // Other tests change the shared configuration; use what is current.
+                format!(
+                    "/v1/models/{}",
+                    config["models"][0]["model_name"].as_str().unwrap()
+                )
             } else {
                 concrete_path(path)
             };
@@ -1065,6 +1191,166 @@ mod contract_tests {
             assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
             assert!(response["error"].is_string(), "body: {body}");
         }
+    }
+
+    #[tokio::test]
+    async fn single_model_crud_changes_only_that_model() {
+        if std::env::var_os("ONEFLOW_TEST_DATABASE_URL").is_none() {
+            eprintln!("Skipping model CRUD test: set ONEFLOW_TEST_DATABASE_URL");
+            return;
+        }
+        let _config_lock = crate::SHARED_CONFIG_TEST_LOCK.lock().await;
+        const SECRET: &str = "sk-model-crud-secret";
+        let (app, mut daemons) = seeded_app_with_broadcast(Vec::new()).await;
+        let model = |name: &str, parameters: Value| {
+            json!({
+                "model_name": name,
+                "provider": "custom_openai",
+                "api_base": "https://example.test/v1",
+                "parameters": parameters,
+            })
+        };
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let body = json!({
+            "version": format!("crud-a-{tag}"),
+            "models": [model("keyed", json!({ "api_key": SECRET })), model("other", json!({}))],
+        });
+        let (status, _) = call(app.clone(), "put", "/v1/config", Some(&body.to_string())).await;
+        assert_eq!(status, StatusCode::OK);
+        while daemons.try_recv().is_ok() {}
+
+        // Read one, redacted.
+        let (status, one) = call(app.clone(), "get", "/v1/models/keyed", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(one["api_key_configured"], true);
+        assert!(!one.to_string().contains(SECRET));
+        let (status, _) = call(app.clone(), "get", "/v1/models/nope", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Replace keeps the stored key and the other model; daemons get it.
+        let v2 = format!("crud-b-{tag}");
+        let (status, stored) = call(
+            app.clone(),
+            "put",
+            &format!("/v1/models/keyed?version={v2}"),
+            Some(&model("keyed", json!({ "upstream_model": "u2" })).to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stored["version"], v2.as_str());
+        assert_eq!(stored["models"].as_array().unwrap().len(), 2);
+        assert_eq!(stored["models"][0]["api_key_configured"], true);
+        assert_eq!(stored["models"][0]["parameters"]["upstream_model"], "u2");
+        match daemons.recv().await.unwrap() {
+            ControlMessage::ConfigUpdate {
+                models, version, ..
+            } => {
+                assert_eq!(version, v2);
+                assert_eq!(
+                    models[0].parameters.get("api_key").map(String::as_str),
+                    Some(SECRET)
+                );
+                assert_eq!(models[1].model_name, "other");
+            }
+            other => panic!("expected ConfigUpdate, got {other:?}"),
+        }
+
+        // Adding is a 201 and appends.
+        let (status, stored) = call(
+            app.clone(),
+            "put",
+            &format!("/v1/models/fresh?version=crud-c-{tag}"),
+            Some(&model("fresh", json!({})).to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(stored["models"][2]["model_name"], "fresh");
+
+        // Bad requests store nothing.
+        for (method, path, body, expected) in [
+            (
+                "put",
+                "/v1/models/fresh".to_string(),
+                Some(model("fresh", json!({}))),
+                "version",
+            ),
+            (
+                "put",
+                format!("/v1/models/fresh?version=x-{tag}"),
+                Some(model("other", json!({}))),
+                "does not match",
+            ),
+            (
+                "put",
+                format!("/v1/models/fresh?version=x-{tag}"),
+                Some(
+                    json!({ "model_name": "fresh", "provider": "p", "api_base": "fresh.example", "parameters": {} }),
+                ),
+                "not an absolute URI",
+            ),
+            (
+                "delete",
+                "/v1/models/fresh?version=".to_string(),
+                None,
+                "version",
+            ),
+        ] {
+            let body = body.map(|body| body.to_string());
+            let (status, response) = call(app.clone(), method, &path, body.as_deref()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {path}");
+            assert!(
+                response["error"].as_str().unwrap().contains(expected),
+                "{method} {path}: {response}"
+            );
+        }
+        let (_, current) = call(app.clone(), "get", "/v1/config", None).await;
+        assert_eq!(current["version"], format!("crud-c-{tag}").as_str());
+
+        // Delete removes the model and its key; the last one cannot go.
+        let (status, stored) = call(
+            app.clone(),
+            "delete",
+            &format!("/v1/models/keyed?version=crud-d-{tag}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let names: Vec<&str> = stored["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|model| model["model_name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["other", "fresh"]);
+        let (status, _) = call(
+            app.clone(),
+            "delete",
+            &format!("/v1/models/keyed?version=crud-e-{tag}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = call(
+            app.clone(),
+            "delete",
+            &format!("/v1/models/fresh?version=crud-f-{tag}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, response) = call(
+            app.clone(),
+            "delete",
+            &format!("/v1/models/other?version=crud-g-{tag}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+        let (_, page) = call(app.clone(), "get", "/v1/config/history?limit=1", None).await;
+        assert_eq!(
+            page["items"][0]["version"],
+            format!("crud-f-{tag}").as_str()
+        );
     }
 
     /// `api_base` must be an absolute http(s) URI the daemon can append to.

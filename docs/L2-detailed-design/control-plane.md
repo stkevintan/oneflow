@@ -44,6 +44,9 @@ Presence and recent usage remain process-local. See
 | PUT | `/v1/config` | `put_config` | Validates, merges write-only keys, stores, records history, and broadcasts the full set; returns it redacted. |
 | GET | `/v1/config/history` | `list_config_history` | `ConfigHistoryPage`, newest first, key-free (see below). |
 | POST | `/v1/config/history/{id}/rollback` | `rollback_config` | Restore entry `id` under a new `version`, like a PUT; JSON 404 for an unknown id. |
+| GET | `/v1/models/{model_name}` | `get_model` | One model, redacted; JSON 404 if absent. |
+| PUT | `/v1/models/{model_name}?version=` | `put_model` | Replace or append one model (201 when added), others untouched; body `model_name` must match the path. Stored, recorded and broadcast like a PUT of the whole config. |
+| DELETE | `/v1/models/{model_name}?version=` | `delete_model` | Remove one model and its key; 404 if absent, 400 for the last model. |
 | GET | `/v1/daemons` | `list_daemons` | `DaemonList { items }`, ordered by `connection_id`. |
 | POST | `/v1/daemons` | Daemon credentials | Provision a unique daemon ID; 201 with one-time token. |
 | GET | `/v1/daemons/credentials` | Daemon credentials | Durable metadata including offline/revoked daemons; no token/hash. |

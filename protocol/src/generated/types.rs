@@ -233,6 +233,61 @@ authenticated control channel.
     ///Provider adapter, for example `custom_openai`.
     pub provider: String,
 }
+impl ModelConfig {
+    /// Construct this request with every required wire field.
+    pub fn new(
+        api_base: String,
+        model_name: String,
+        parameters: ModelConfigParameters,
+        provider: String,
+    ) -> Self {
+        Self {
+            api_base,
+            model_name,
+            parameters,
+            provider,
+            api_key_configured: None,
+        }
+    }
+    /// Start a dependency-free builder with every required wire field.
+    pub fn builder(
+        api_base: String,
+        model_name: String,
+        parameters: ModelConfigParameters,
+        provider: String,
+    ) -> ModelConfigBuilder {
+        ModelConfigBuilder::new(api_base, model_name, parameters, provider)
+    }
+}
+/// Dependency-free builder for [`#struct_name`].
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct ModelConfigBuilder {
+    value: ModelConfig,
+}
+impl ModelConfigBuilder {
+    /// Start a builder with every required wire field.
+    pub fn new(
+        api_base: String,
+        model_name: String,
+        parameters: ModelConfigParameters,
+        provider: String,
+    ) -> Self {
+        Self {
+            value: ModelConfig::new(api_base, model_name, parameters, provider),
+        }
+    }
+    #[doc = concat!("Set the optional `", "api_key_configured", "` request field.")]
+    #[must_use]
+    pub fn api_key_configured(mut self, api_key_configured: bool) -> Self {
+        self.value.api_key_configured = Some(api_key_configured);
+        self
+    }
+    /// Finish building the request model.
+    pub fn build(self) -> ModelConfig {
+        self.value
+    }
+}
 /**Free-form provider options. `upstream_model` rewrites the model id
 sent upstream; `api_key_env` names an environment variable holding
 the upstream credential on the daemon host (preferred).

@@ -123,6 +123,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/models/{model_name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                model_name: string;
+            };
+            cookie?: never;
+        };
+        /** Read one model of the desired configuration */
+        get: operations["getModel"];
+        /**
+         * Add or replace one model
+         * @description Replaces the model named `model_name`, or appends it, and leaves the
+         *     other models as they are. The result is stored under `version`,
+         *     recorded in history and pushed to every daemon, like `PUT /v1/config`.
+         *     The body's `model_name` must equal the path's.
+         *
+         *     As with `PUT /v1/config`, omitting `parameters.api_key` keeps the key
+         *     stored for this name and an empty `api_key` removes it.
+         */
+        put: operations["putModel"];
+        post?: never;
+        /**
+         * Remove one model
+         * @description Removes the model and its stored key, stores the rest under `version`
+         *     and pushes it like `PUT /v1/config`. The last model cannot be removed
+         *     (a configuration needs at least one): that is a 400.
+         */
+        delete: operations["deleteModel"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/daemons": {
         parameters: {
             query?: never;
@@ -662,7 +697,10 @@ export interface components {
             };
         };
     };
-    parameters: never;
+    parameters: {
+        /** @description Non-empty version label for the configuration this change stores. */
+        ConfigVersion: string;
+    };
     requestBodies: never;
     headers: never;
     pathItems: never;
@@ -799,6 +837,101 @@ export interface operations {
                 "application/json": components["schemas"]["RollbackConfigRequest"];
             };
         };
+        responses: {
+            /** @description The stored configuration */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelConfigSet"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getModel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                model_name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The model, with `api_key_configured` in place of any key */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelConfig"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    putModel: {
+        parameters: {
+            query: {
+                /** @description Non-empty version label for the configuration this change stores. */
+                version: components["parameters"]["ConfigVersion"];
+            };
+            header?: never;
+            path: {
+                model_name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModelConfig"];
+            };
+        };
+        responses: {
+            /** @description The model was replaced; the stored configuration */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelConfigSet"];
+                };
+            };
+            /** @description The model was added; the stored configuration */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelConfigSet"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    deleteModel: {
+        parameters: {
+            query: {
+                /** @description Non-empty version label for the configuration this change stores. */
+                version: components["parameters"]["ConfigVersion"];
+            };
+            header?: never;
+            path: {
+                model_name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description The stored configuration */
             200: {

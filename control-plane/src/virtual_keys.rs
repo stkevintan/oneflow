@@ -1,7 +1,7 @@
 use std::{collections::HashSet, str::FromStr};
 
 use anyhow::{Context, Result};
-use protocol::{ModelConfigSet, VirtualKeyPolicy, VirtualKeyPolicySnapshot};
+use protocol::{ModelConfig, ModelConfigSet, VirtualKeyPolicy, VirtualKeyPolicySnapshot};
 use rand::{rngs::OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use sqlx::{
@@ -39,6 +39,27 @@ pub(crate) enum RollbackOutcome {
     /// No history entry with that id.
     NotFound,
     /// The entry fails today's validation (stored before a rule existed).
+    Invalid(String),
+}
+
+/// A change to one model of the configuration.
+pub(crate) enum ModelChange {
+    /// Replace the model with this `model_name`, or append it.
+    Upsert(ModelConfig),
+    /// Remove the model with this name.
+    Remove(String),
+}
+
+/// What a single-model change did.
+pub(crate) enum ChangeOutcome {
+    /// Stored and current; unredacted. `created` when an upsert added a model.
+    Stored {
+        config: ModelConfigSet,
+        created: bool,
+    },
+    /// No model with that name to remove.
+    NotFound,
+    /// The resulting configuration fails validation; nothing was stored.
     Invalid(String),
 }
 
@@ -156,6 +177,54 @@ impl VirtualKeyStore {
         write_config(&mut tx, &config, ConfigSource::Put, None).await?;
         tx.commit().await?;
         Ok(config)
+    }
+
+    /// Apply `change` to the current configuration under `version`, in the
+    /// same locked transaction as [`Self::replace_config`], so concurrent
+    /// single-model edits cannot lose each other. Other models keep their
+    /// stored keys; an upserted model that omits `api_key` keeps the one
+    /// stored for its name, as in a full replacement.
+    pub(crate) async fn change_model(
+        &self,
+        version: String,
+        change: ModelChange,
+        validate: impl FnOnce(&ModelConfigSet) -> std::result::Result<(), String>,
+    ) -> Result<ChangeOutcome> {
+        let mut tx = self.pool.begin().await?;
+        lock_mutations(&mut tx).await?;
+        let current = read_config(&mut tx).await?;
+        let mut next = current.clone();
+        next.version = version;
+        let mut created = false;
+        match change {
+            ModelChange::Upsert(model) => {
+                match next
+                    .models
+                    .iter_mut()
+                    .find(|existing| existing.model_name == model.model_name)
+                {
+                    Some(existing) => *existing = model,
+                    None => {
+                        next.models.push(model);
+                        created = true;
+                    }
+                }
+            }
+            ModelChange::Remove(name) => {
+                let before = next.models.len();
+                next.models.retain(|model| model.model_name != name);
+                if next.models.len() == before {
+                    return Ok(ChangeOutcome::NotFound);
+                }
+            }
+        }
+        if let Err(message) = validate(&next) {
+            return Ok(ChangeOutcome::Invalid(message));
+        }
+        let config = crate::config_secrets::merge(next, &current);
+        write_config(&mut tx, &config, ConfigSource::Put, None).await?;
+        tx.commit().await?;
+        Ok(ChangeOutcome::Stored { config, created })
     }
 
     /// Stored configurations, newest first, at most `limit`, older than
