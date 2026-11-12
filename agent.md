@@ -124,7 +124,7 @@ contract/openapi.yaml                 source of truth, edited first
 - Earlier end-to-end checks still hold: config pushed through `PUT /v1/config` is broadcast, a live
   daemon immediately serves the new model list, `upstream_model` rewrites the model id sent
   upstream, and `api_key_env` injects the upstream bearer token
-- `cargo test --workspace` passes: 37 control-plane, 33 daemon, 3 protocol, and 6
+- `cargo test --workspace` passes: 37 control-plane, 36 daemon, 3 protocol, and 6
   config-provider tests; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets`,
   `scripts/generate-types.sh --check`, `npm test` (31), `npm run typecheck` and `npm run build`
   pass. The PostgreSQL-backed control-plane tests are skipped unless
@@ -205,7 +205,8 @@ address. The inference routes use fixed paths such as `/v1/chat/completions`.
    usage filters by daemon and model, and key management per daemon.
 
 **Then**
-7. **Improve reconnection logic**: Replace the fixed retry delay with exponential backoff and jitter.
+7. **Improve reconnection logic**: ✅ exponential backoff (1 s doubling to 60 s) with equal jitter,
+   reset after a session that stayed up 30 s (`daemon/src/backoff.rs`).
 8. **Validate `api_base` against its declared `format: uri`**: ✅ `validate_config` requires an
    absolute `http`/`https` URL without whitespace or a fragment; the dashboard form checks the same.
 9. **Authenticate the control channel**: ✅ daemons authenticate with provisioned credentials and

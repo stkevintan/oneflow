@@ -90,7 +90,7 @@ sequenceDiagram
     loop every 5 s
         D->>CP: Heartbeat (active_requests, loaded_models)
     end
-    Note over D,CP: On disconnect the record is removed;<br/>the daemon retries every 5 s.
+    Note over D,CP: On disconnect the record is removed;<br/>the daemon retries with backoff (1 s doubling to 60 s, jittered).
 ```
 
 Configuration and policy are sent only after authenticated registration.
@@ -156,7 +156,7 @@ plane URL must be a WebSocket URL reachable from the daemon host, for example
 | Attribute | How it is addressed today |
 | --- | --- |
 | Availability of inference | Requires an unexpired policy lease; fails closed at startup or expiry. |
-| Network resilience | Outbound WebSocket, reconnect every 5 s, current config re-sent on every connect. |
+| Network resilience | Outbound WebSocket, reconnect with jittered exponential backoff (1–60 s), current config re-sent on every connect. |
 | Accuracy of usage | Provider-reported usage only; missing usage is flagged `usage_reported: false`, not recorded as zero. |
 | Bounded resources | Telemetry queue (256), usage history (200), usage page size (≤ 200), unary body cap, SSE scan buffer cap, upstream timeouts. |
 | Contract drift | Generated types plus `contract_tests` that exercise the real router. |

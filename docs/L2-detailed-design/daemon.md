@@ -60,8 +60,15 @@ stateDiagram-v2
     Registered --> Registered: text frame → handle_control_message
     Registered --> Registered: Ping → Pong
     Registered --> Backoff: Close, stream end, error, failed send
-    Backoff --> Connecting: sleep 5 s
+    Backoff --> Connecting: sleep backoff delay
 ```
+
+- **Reconnect backoff** (`backoff.rs`): the retry window starts at 1 s and
+  doubles per failed attempt up to 60 s; each wait is drawn uniformly from the
+  window's upper half (equal jitter), so daemons that lost the control plane
+  together spread out. A session that stayed registered for 30 s resets it, so
+  a control plane that accepts and immediately drops the connection is still
+  backed off. Logs carry `retry_in_ms`.
 
 - **`ConfigUpdate`** replaces the whole model table and updates
   `models_updated_at`. Models absent from the update disappear immediately.
@@ -195,5 +202,3 @@ accounting during streaming, and health/model lookup. `main.rs`
 - Only `/v1/chat/completions` is proxied (no embeddings, completions, or
   responses APIs).
 - `CLUSTER_NAME` defaults to `cluster-ssh198`; it should be set per deployment.
-- Connection retries use a fixed 5 s delay with no jitter, so many daemons
-  reconnect in lockstep after a control-plane restart.

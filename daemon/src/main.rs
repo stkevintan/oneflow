@@ -1,5 +1,6 @@
 mod api;
 mod auth;
+mod backoff;
 mod upstream;
 
 use std::{
@@ -674,6 +675,7 @@ async fn run_control_channel(
     state: AppState,
     mut telemetry_rx: mpsc::Receiver<DaemonMessage>,
 ) {
+    let mut backoff = backoff::Backoff::default();
     loop {
         info!(state = "connecting", url = %control_plane_url, "connecting to control plane");
         let request = match control_request(&control_plane_url, &state.settings) {
@@ -701,6 +703,7 @@ async fn run_control_channel(
                     .await
                     .is_ok()
                 {
+                    let registered_at = time::Instant::now();
                     info!(
                         state = "registered",
                         daemon_id = %state.settings.daemon_id,
@@ -750,27 +753,32 @@ async fn run_control_channel(
                             }
                         }
                     }
+                    if registered_at.elapsed() >= backoff::STABLE_AFTER {
+                        backoff.reset();
+                    }
                 } else {
                     warn!("failed to register with control plane");
                 }
+                let delay = backoff.next_delay();
                 warn!(
                     state = "reconnecting",
-                    retry_in_secs = 5,
+                    retry_in_ms = delay.as_millis() as u64,
                     "control plane connection closed"
                 );
+                time::sleep(delay).await;
             }
             Err(err) => {
+                let delay = backoff.next_delay();
                 warn!(
                     state = "reconnecting",
                     url = %control_plane_url,
-                    retry_in_secs = 5,
+                    retry_in_ms = delay.as_millis() as u64,
                     error = %err,
                     "control plane connection failed"
-                )
+                );
+                time::sleep(delay).await;
             }
         }
-
-        time::sleep(Duration::from_secs(5)).await;
     }
 }
 
