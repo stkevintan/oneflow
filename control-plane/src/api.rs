@@ -22,6 +22,7 @@ use tracing::info;
 use crate::{
     constant_time_token_eq, control, now_ts,
     store::{UsageQuery, USAGE_HISTORY_LIMIT},
+    virtual_keys::RollbackOutcome,
     AppState,
 };
 
@@ -344,14 +345,18 @@ async fn rollback_config(
     match state
         .access
         .store
-        .rollback_config(id, request.version)
+        .rollback_config(id, request.version, validate_config)
         .await
     {
-        Ok(Some(config)) => {
+        Ok(RollbackOutcome::Restored(config)) => {
             info!(from = id, version = %config.version, "rolled back model configuration");
             publish_config(&state, config).await
         }
-        Ok(None) => error(StatusCode::NOT_FOUND, "history entry not found"),
+        Ok(RollbackOutcome::NotFound) => error(StatusCode::NOT_FOUND, "history entry not found"),
+        Ok(RollbackOutcome::Invalid(message)) => error(
+            StatusCode::BAD_REQUEST,
+            format!("history entry {id} cannot be restored: {message}"),
+        ),
         Err(err) => {
             tracing::error!(error = %err, "failed to roll back model configuration");
             error(
@@ -373,9 +378,34 @@ fn validate_config(config: &ModelConfigSet) -> Result<(), String> {
         if model.model_name.trim().is_empty() {
             return Err("every model requires a model_name".to_string());
         }
-        if model.api_base.trim().is_empty() {
-            return Err(format!("model '{}' requires an api_base", model.model_name));
-        }
+        validate_api_base(model)
+            .map_err(|message| format!("model '{}' {message}", model.model_name))?;
+    }
+    Ok(())
+}
+
+/// `api_base` is declared `format: uri`; the daemon appends `/chat/completions`
+/// to it, so it must be an absolute http(s) URL without a fragment.
+fn validate_api_base(model: &protocol::ModelConfig) -> Result<(), String> {
+    let api_base = model.api_base.trim();
+    if api_base.is_empty() {
+        return Err("requires an api_base".to_string());
+    }
+    if api_base != model.api_base {
+        return Err("has an api_base with surrounding whitespace".to_string());
+    }
+    let url = url::Url::parse(api_base)
+        .map_err(|err| format!("has an api_base that is not an absolute URI ({err})"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!(
+            "has an api_base with scheme '{}'; use http or https",
+            url.scheme()
+        ));
+    }
+    if url.fragment().is_some() {
+        return Err(
+            "has an api_base with a fragment, which the appended path would be behind".to_string(),
+        );
     }
     Ok(())
 }
@@ -947,6 +977,45 @@ mod contract_tests {
         assert_eq!(page["items"][0]["source"], "rollback");
         assert_eq!(page["items"][0]["rolled_back_from"], v1_id);
 
+        // A row stored before api_base was validated cannot come back.
+        let stale: i64 = sqlx::query_scalar(
+            "INSERT INTO model_config_history (version, config, created_at, source) \
+             VALUES ('stale', $1, 1, 'put') RETURNING id",
+        )
+        .bind(json!({
+            "version": "stale",
+            "models": [{
+                "model_name": "legacy",
+                "provider": "custom_openai",
+                "api_base": "legacy.example/v1",
+                "parameters": {},
+            }],
+        }))
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        let (status, response) = call(
+            app.clone(),
+            "post",
+            &format!("/v1/config/history/{stale}/rollback"),
+            Some(&json!({ "version": "stale-restored" }).to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            response["error"]
+                .as_str()
+                .unwrap()
+                .contains("not an absolute URI"),
+            "unexpected error: {response}"
+        );
+        let (_, current) = call(app.clone(), "get", "/v1/config", None).await;
+        assert_eq!(
+            current["version"],
+            v3.as_str(),
+            "a rejected rollback changed the config"
+        );
+
         for (path, body, expected) in [
             (
                 "/v1/config/history/0/rollback",
@@ -995,6 +1064,44 @@ mod contract_tests {
             let (status, response) = call(app().await, "put", "/v1/config", Some(&body)).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
             assert!(response["error"].is_string(), "body: {body}");
+        }
+    }
+
+    /// `api_base` must be an absolute http(s) URI the daemon can append to.
+    #[tokio::test]
+    async fn api_base_must_be_an_absolute_http_uri() {
+        let body = |api_base: &str| {
+            json!({
+                "version": "uri-test",
+                "models": [{
+                    "model_name": "m",
+                    "provider": "custom_openai",
+                    "api_base": api_base,
+                    "parameters": {},
+                }],
+            })
+            .to_string()
+        };
+        for (api_base, expected) in [
+            ("", "requires an api_base"),
+            ("   ", "requires an api_base"),
+            (" https://example.test/v1", "surrounding whitespace"),
+            ("api.example.test/v1", "not an absolute URI"),
+            ("/v1", "not an absolute URI"),
+            ("https://", "not an absolute URI"),
+            ("ftp://example.test/v1", "use http or https"),
+            ("file:///srv/models", "use http or https"),
+            ("mailto:ops@example.test", "use http or https"),
+            ("https://example.test/v1#frag", "fragment"),
+        ] {
+            let (status, response) =
+                call(app().await, "put", "/v1/config", Some(&body(api_base))).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "api_base: {api_base:?}");
+            let message = response["error"].as_str().unwrap();
+            assert!(
+                message.contains(expected) && message.contains("'m'"),
+                "api_base {api_base:?}: unexpected message {message:?}"
+            );
         }
     }
 

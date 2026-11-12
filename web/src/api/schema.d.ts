@@ -490,7 +490,9 @@ export interface components {
             provider: string;
             /**
              * Format: uri
-             * @description Upstream base URL, for example `https://api.deepseek.com/v1`. Must be non-empty.
+             * @description Upstream base URL, for example `https://api.deepseek.com/v1`. The daemon
+             *     appends `/chat/completions`, so it must be an absolute `http` or `https` URL
+             *     without surrounding whitespace or a `#fragment`; anything else is a 400.
              */
             api_base: string;
             /**

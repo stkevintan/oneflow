@@ -68,7 +68,10 @@ Rejected with `400 { "error": … }` when:
 
 - `version` is blank;
 - `models` is empty;
-- any model has a blank `model_name` or `api_base`.
+- any model has a blank `model_name` or `api_base`;
+- an `api_base` is not an absolute `http`/`https` URL (parsed with the `url`
+  crate), has surrounding whitespace, or has a `#fragment` that the appended
+  `/chat/completions` would end up behind (`validate_api_base`).
 
 Provider names and `parameters` are not validated by the control plane.
 
@@ -107,7 +110,10 @@ empty. Only the latest 100 rows (`CONFIG_HISTORY_LIMIT`) are kept.
   `merge` against the current config as a PUT, so each model keeps the key
   currently stored for its name. A model whose key has since been removed comes
   back without one; the dashboard warns before rolling back. The result is
-  broadcast like a PUT and recorded as a `rollback` row.
+  broadcast like a PUT and recorded as a `rollback` row. The entry is checked
+  with the same `validate_config` as a PUT, inside the transaction: a row stored
+  before a rule existed (an `api_base` that is not an absolute URI, say) is a 400
+  and leaves the current configuration alone.
 - Paging: `limit` 1..=100 (default 20); `cursor` is the last row's id from the
   previous page (`next_cursor`). Malformed values → 400.
 
@@ -241,6 +247,7 @@ daemon and usage events:
 | `config_history_records_writes_and_rolls_back` | Stored history is key-free, oldest are pruned, rollback restores models under a new version, reuses stored keys, reaches daemons, and is itself recorded |
 | `provider_api_key_is_write_only_but_reaches_daemons` | `api_key` is never in GET/PUT bodies, survives a GET→PUT round trip, is broadcast to daemons, and `""` removes it |
 | `invalid_config_is_a_json_400` | Validation and malformed JSON both return `ErrorResponse` |
+| `api_base_must_be_an_absolute_http_uri` | Relative, schemeless, non-http(s), padded and fragment `api_base` values → 400 naming the model |
 | `daemon_lookup_returns_the_record_or_a_json_404` | `GET /v1/daemons/{id}` |
 | `usage_events_page_newest_first_with_filters` | Ordering, cursor, and filters |
 | `invalid_usage_queries_are_json_400` | Bad `limit` and `cursor` |

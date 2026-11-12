@@ -32,6 +32,16 @@ impl ConfigSource {
     }
 }
 
+/// What a rollback did.
+pub(crate) enum RollbackOutcome {
+    /// Stored and current; unredacted.
+    Restored(ModelConfigSet),
+    /// No history entry with that id.
+    NotFound,
+    /// The entry fails today's validation (stored before a rule existed).
+    Invalid(String),
+}
+
 /// One stored configuration, redacted.
 pub(crate) struct ConfigHistoryEntry {
     pub id: i64,
@@ -171,13 +181,14 @@ impl VirtualKeyStore {
     /// Make history entry `id` the current configuration again, under
     /// `version`. Its models are restored as they were; literal `api_key`
     /// values are not in history, so each model keeps the key currently
-    /// stored for its `model_name` (if any). Returns `None` when `id` is not
-    /// in history, else the stored (unredacted) configuration.
+    /// stored for its `model_name` (if any). The entry is checked with
+    /// `validate` first, as a PUT would be.
     pub(crate) async fn rollback_config(
         &self,
         id: i64,
         version: String,
-    ) -> Result<Option<ModelConfigSet>> {
+        validate: impl FnOnce(&ModelConfigSet) -> std::result::Result<(), String>,
+    ) -> Result<RollbackOutcome> {
         let mut tx = self.pool.begin().await?;
         lock_mutations(&mut tx).await?;
         let target: Option<serde_json::Value> =
@@ -186,16 +197,19 @@ impl VirtualKeyStore {
                 .fetch_optional(&mut *tx)
                 .await?;
         let Some(target) = target else {
-            return Ok(None);
+            return Ok(RollbackOutcome::NotFound);
         };
         let mut target: ModelConfigSet =
             serde_json::from_value(target).context("history entry is invalid")?;
         target.version = version;
+        if let Err(message) = validate(&target) {
+            return Ok(RollbackOutcome::Invalid(message));
+        }
         let current = read_config(&mut tx).await?;
         let config = crate::config_secrets::merge(target, &current);
         write_config(&mut tx, &config, ConfigSource::Rollback, Some(id)).await?;
         tx.commit().await?;
-        Ok(Some(config))
+        Ok(RollbackOutcome::Restored(config))
     }
 
     pub async fn create(&self, request: CreateVirtualKey, now: i64) -> Result<CreatedVirtualKey> {

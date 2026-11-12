@@ -128,6 +128,14 @@ describe("model list", () => {
     expect(add.getByLabelText("API base URL").getAttribute("aria-invalid")).toBe("true");
     expect(fetchMock).not.toHaveBeenCalled();
 
+    // The daemon appends /chat/completions, which a fragment would swallow.
+    fireEvent.change(add.getByLabelText("API base URL"), {
+      target: { value: "https://fresh.example/v1#eu" },
+    });
+    fireEvent.click(add.getByRole("button", { name: "Save and push" }));
+    expect(add.getByText(/#fragment/)).toBeTruthy();
+    expect(fetchMock).not.toHaveBeenCalled();
+
     fireEvent.change(add.getByLabelText("Model name"), { target: { value: "fresh" } });
     fireEvent.change(add.getByLabelText("API base URL"), {
       target: { value: "https://fresh.example/v1" },
