@@ -124,7 +124,7 @@ contract/openapi.yaml                 source of truth, edited first
 - Earlier end-to-end checks still hold: config pushed through `PUT /v1/config` is broadcast, a live
   daemon immediately serves the new model list, `upstream_model` rewrites the model id sent
   upstream, and `api_key_env` injects the upstream bearer token
-- `cargo test --workspace` passes: 37 control-plane, 36 daemon, 3 protocol, and 6
+- `cargo test --workspace` passes: 38 control-plane, 36 daemon, 3 protocol, and 6
   config-provider tests; `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets`,
   `scripts/generate-types.sh --check`, `npm test` (31), `npm run typecheck` and `npm run build`
   pass. The PostgreSQL-backed control-plane tests are skipped unless
@@ -187,8 +187,9 @@ address. The inference routes use fixed paths such as `/v1/chat/completions`.
 
 **Phase 2 — make the control-plane management API usable**
 1. **Contract-first resources**: ✅ v1 API done (`/v1/config`, `/v1/daemons`, paginated
-   `/v1/usage/events`) and the declared bearer auth is enforced (ADR 0001 step 2). Still open:
-   per-model CRUD (`/v1/models/{model_name}`) and daemon commands. Config history and rollback
+   `/v1/usage/events`) and the declared bearer auth is enforced (ADR 0001 step 2). Per-model
+   CRUD is done (`/v1/models/{model_name}`: GET/PUT/DELETE with a `version` query, one locked
+   transaction, keys kept as in a full PUT). Still open: daemon commands. Config history and rollback
    are done (`/v1/config/history`, key-free, latest 100, dashboard card).
 2. **Secrets**: ✅ `parameters.api_key` is write-only through the management API: never
    returned (responses carry `api_key_configured`), kept when a `PUT` omits it, removed by
