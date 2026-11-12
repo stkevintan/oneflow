@@ -103,7 +103,7 @@ Rules that keep this correct:
   instances.
 - **Load balancing.** A WebSocket-capable load balancer spreads daemons
   across instances. No sticky sessions are needed for `/v1/*`. On instance
-  shutdown, daemons reconnect (5 s retry) and land on another instance.
+  shutdown, daemons reconnect (jittered 1–60 s backoff) and land on another instance.
 
 ### Schema sketch
 
